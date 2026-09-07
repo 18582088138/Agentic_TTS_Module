@@ -286,7 +286,7 @@ git commit -m "docs: git 分步提交指令汇总"
 ## 核对
 
 ```bash
-git log --oneline            # 应为 19 条（含步骤 19）
+git log --oneline            # 应为 20 条（含步骤 19、20）
 git status --short           # 应为空（outputs/ 已忽略）
 ```
 
@@ -328,3 +328,40 @@ git status --short          # 预期：空（outputs/handoff/ 在 outputs 下，
 ```
 
 核对：`git log --oneline` 应为 19 条。
+
+---
+
+## 步骤 20/20 · 界面挂进服务，交接单回传进度与返回（2026-09-08）
+
+下游实测：服务与界面各起一个进程，**各加载一份权重**，8 GB 卡顶满，
+而且每次点「高级配置」都要等第二个进程冷启动。
+
+```bash
+cd /c/Users/test/Downloads/xkd/Agent_TTS_Module
+
+git add agentic_tts/engine.py
+git add agentic_tts/gui/app.py
+git add agentic_tts/server/app.py
+git add agentic_tts/cli.py
+git add docs/04_api_reference.md docs/07_gui_guide.md docs/08_git_commands.md
+
+git commit -m "feat(server): 图形界面挂进 HTTP 服务，一个进程一份权重
+
+- gui/app.py 拆成 build()/run()/mount()：mount() 用 ui.run_with 挂到 /gui，
+  与服务共用同一个 TTSModule。cli serve 默认挂（--no-gui 可关）
+- 锁移到 TTSModule.lock：界面与 HTTP 请求必须**共用**一把锁，
+  各拿一把会在「界面点生成 + 一条 HTTP 请求」时同时要两份权重
+- 挂载后静态产物路由带前缀，media_url 跟着拼 /gui/outputs/...，否则播放器 404
+- cli gui 保留为独立进程，但显式提示它会另加载一份权重
+- 交接单增加 return_url / done / total：
+  · 逐段生成只写 running + done/total（调用方据此显示进度条）
+  · 「全部生成」「合并」才写 done + 产物清单，避免调用方收走半成品
+  · 完成后按 return_url 关掉本标签页／跳回调用方，另留「回传并返回」按钮
+- handoff 的 gui_url 改成相对路径：写死 host/port 在「服务绑 0.0.0.0、
+  从局域网访问」时会给出一个打不开的地址"
+
+git status --short          # 预期：空
+```
+
+核对：`git log --oneline` 应为 20 条。
+

@@ -7,6 +7,7 @@ HTTP 服务 / HTTP service —— 端点与 `TTSModule` 的方法一一对应。
     POST /tts/design /tts/clone   语法糖，内部固定 mode
     POST /tts/batch         多段合成，每段落盘 + 可选拼接
     POST /tts/split         一整段文本 → 多段
+    GET  /gui               图形界面（**挂在同一个进程里，共用一份权重**）
     POST /gui/handoff       把稿子交给 GUI 精修，回一个 token 与打开用的 URL
     GET  /gui/handoff/{token}     查这张交接单（生成完 GUI 会写回产物清单）
     GET  /outputs/{run}/{file}    取产物
@@ -20,7 +21,6 @@ One module, one lock: concurrent requests would need two copies of the weights.
 from __future__ import annotations
 
 import base64
-import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -76,6 +76,7 @@ class HandoffBody(BaseModel):
     source: str = Field("", description="谁交过来的，只用于界面提示")
     voice: Optional[str] = None
     instruct: Optional[str] = None
+    return_url: str = Field("", description="生成完让界面跳回哪里（调用方自己的页面）")
     meta: dict[str, Any] = Field(default_factory=dict,
                                  description="调用方自己的上下文，原样带回")
 
@@ -109,12 +110,23 @@ def _payload(result: SynthResult, encoding: str) -> Any:
     return data
 
 
-def create_app(config: Config | str | None = None) -> FastAPI:
-    """建 FastAPI 应用 / Build the FastAPI app（权重仍是懒加载的）。"""
+def create_app(config: Config | str | None = None, *,
+               gui: bool = True, gui_path: str = "/gui") -> FastAPI:
+    """
+    建 FastAPI 应用 / Build the FastAPI app（权重仍是懒加载的）。
+
+    参数 / Args:
+        gui: 是否把图形界面挂在 `gui_path` 上。**默认挂**——
+            界面和服务各起一个进程就是**两份权重**，8 GB 卡上是实打实的内存压力，
+            而两边要的本来就是同一个模型。挂在一起：一个进程、一份权重、一把锁、
+            一个端口，调用方也只需要知道一个地址。
+            Mounted by default: two processes would load two copies of the weights.
+    """
     from agentic_tts.engine import TTSModule
 
     module = TTSModule(config)
-    lock = threading.Lock()          # 见模块文档：单进程内串行合成
+    # 锁在 module 上：界面与 HTTP 请求共用它才能真正串行（见 engine.py）
+    lock = module.lock
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -122,12 +134,14 @@ def create_app(config: Config | str | None = None) -> FastAPI:
         module.release()             # 退出时卸权重、清显存（仅 del 不还显存）
 
     app = FastAPI(title="Agentic TTS", version="0.1.0", lifespan=lifespan)
+    gui_path = gui_path.rstrip("/") or "/gui"
 
     # ------------------------------------------------------------ 查询 / info
 
     @app.get("/health")
     def health() -> dict:
-        return {"status": "ok", "backend": module.config.engine.backend}
+        return {"status": "ok", "backend": module.config.engine.backend,
+                "gui": gui_path if gui else ""}
 
     @app.get("/info")
     def info() -> dict:
@@ -246,11 +260,17 @@ def create_app(config: Config | str | None = None) -> FastAPI:
             "source": body.source,
             "voice": body.voice,
             "instruct": body.instruct,
+            "return_url": body.return_url,
             "meta": body.meta,
         })
-        gui = module.config.gui
+        # 界面就挂在**本服务**上（见 create_app 的 gui 参数），所以这里给的是
+        # 相对路径：调用方是通过哪个地址访问到我们的，就用哪个地址打开界面。
+        # 写死 host/port 会在「服务绑 0.0.0.0、别人从局域网访问」时给出一个
+        # 打不开的地址。
+        # A relative URL: whichever address reached us is the address that works.
         return {"token": token,
-                "gui_url": f"http://{gui.host}:{gui.port}/?import={token}"}
+                "gui_url": f"{gui_path}/?import={token}",
+                "gui_path": gui_path}
 
     @app.get("/gui/handoff/{token}")
     def read_handoff(token: str) -> dict:
@@ -276,6 +296,15 @@ def create_app(config: Config | str | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="没有这个产物")
         media = "audio/wav" if target.suffix == ".wav" else "application/octet-stream"
         return Response(content=target.read_bytes(), media_type=media)
+
+    # 界面**最后**挂：`ui.run_with` 会往 app 上加中间件与静态路由，
+    # 而 FastAPI 的中间件必须在应用开始处理请求之前装好。
+    # Mounted last: run_with installs middleware, which must precede any request.
+    if gui:
+        from agentic_tts.gui.app import mount as mount_gui
+
+        mount_gui(app, module, path=gui_path)
+        _logger.info("图形界面已挂在 %s（与服务共用一份权重）", gui_path)
 
     return app
 

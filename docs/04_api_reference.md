@@ -64,8 +64,16 @@ tts = TTSModule(config=None)        # None = configs/config.yaml；也可传路�
 ## 2 · HTTP
 
 ```bash
-python -m agentic_tts.server            # 默认 127.0.0.1:8300，交互文档在 /docs
+python -m agentic_tts.cli serve         # 默认 127.0.0.1:8300，交互文档在 /docs
+                                        # 图形界面在 /gui（同进程，共用一份权重）
+python -m agentic_tts.cli serve --no-gui   # 只要 API
 ```
+
+**界面默认挂在服务里。** `create_app(cfg, gui=True)` 把 NiceGUI 挂到 `/gui`，
+和 HTTP 端点共用同一个 `TTSModule`、同一把锁（`module.lock`）。
+另起一个 `cli gui` 进程会**再加载一份权重** —— 8 GB 卡上两份 1.7B 直接顶满，
+所以那条路只留给「只要界面、不要 API」的场合。
+The GUI shares the module and its lock; a separate process would load a second copy.
 
 | 端点 | Body / 参数 | 返回 |
 |---|---|---|
@@ -82,7 +90,8 @@ python -m agentic_tts.server            # 默认 127.0.0.1:8300，交互文档�
 | `POST /tts/batch` | `BatchSynthRequest` + `encoding` | 每段路径 + 合并路径 |
 | `POST /tts/split` | `SplitRequest` | `{"segments":[{text,role,voice}]}` |
 | `POST /gui/handoff` | `segments[]`/`text` + `title`/`source`/`voice`/`instruct`/`meta` | `{"token","gui_url"}` |
-| `GET /gui/handoff/{token}` | — | 那张交接单（`status` / `files` / `run` / `meta`） |
+| `GET /gui/handoff/{token}` | — | 那张交接单（`status` / `files` / `run` / `done` / `total` / `meta`） |
+| `GET /gui` | — | 图形界面本体（挂载点，见上） |
 | `GET /outputs/{run}/{file}` | — | 取产物（路径解析后校验，挡目录穿越） |
 
 **状态码是有含义的**，调用方可以自动处置：
@@ -102,10 +111,14 @@ python -m agentic_tts.server            # 默认 127.0.0.1:8300，交互文档�
 调用方（如 DailyNewsAssistant）想让人在**多段界面**里换音色、克隆、逐句重掷时：
 
 ```
-POST /gui/handoff  {"segments": ["第一段。", "第二段。"], "source": "DNA"}
+POST /gui/handoff  {"segments": ["第一段。", "第二段。"], "source": "DNA",
+                    "return_url": "http://127.0.0.1:8080/"}
    → {"token": "20260908-101530-a1b2c3", "gui_url": "http://127.0.0.1:8301/?import=…"}
 打开 gui_url            → 文本已经填进多段界面的各个文本框
 在界面里生成/合并       → GUI 把 status=done 与产物清单写回同一条记录
+                          （逐段生成时只写 status=running + done/total 供调用方显示进度，
+                           点「全部生成」或「合并」才算完成，否则调用方会收走半成品）
+                          生成完还会按 return_url **关掉本标签页／跳回调用方**
 GET /gui/handoff/{token} → files: ["gui-20260908-101601/merged.wav", …]
 GET /outputs/{run}/{file} → 取回产物
 ```

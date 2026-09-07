@@ -21,8 +21,20 @@
 重跑一遍入口脚本，于是 `ui.run()` 被重复执行、页面直接 500（RAG 模块实测踩过）。
 用显式 page 装饰器后每个客户端还各自拿到自己的段落状态。
 
-⚠️ 合成必须扔到线程里（`run.io_bound`），并全局一把锁串行 ——
-同一张 8 GB 卡上并发两条必然 OOM。
+⚠️ 合成必须扔到线程里（`run.io_bound`），并用 **`module.lock`** 串行 ——
+同一张 8 GB 卡上并发两条必然 OOM。锁在 `TTSModule` 上而不是这个文件里，
+是因为界面通常**挂在 HTTP 服务的同一个进程里**（见 `mount()`）：
+两边各拿一把锁，就会在「界面点生成 + 一条 HTTP 请求」时同时要两份权重。
+
+────────────────────────────────────────────────────────────────────────────
+两种起法 / Two ways to serve this UI
+────────────────────────────────────────────────────────────────────────────
+- **`mount(app, module)`（推荐，默认）**：挂到 HTTP 服务上，`/gui`。
+  一个进程、**一份权重**、一把锁。`cli serve` 就是这么做的。
+- `run(...)`：独立进程（`cli gui`）。它会**自己再造一个 `TTSModule`** ——
+  和服务一起用就是两份权重，8 GB 卡上是实打实的内存压力，所以只在
+  「只要界面、不要 HTTP」时用。
+  A standalone process loads a second copy of the weights; prefer mounting.
 """
 
 from __future__ import annotations
@@ -31,7 +43,6 @@ import inspect
 import os
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -51,9 +62,6 @@ from agentic_tts.core.types import (
 )
 from agentic_tts.gui import theme
 from agentic_tts.text.events import known_events
-
-# 全进程一把锁：GUI 只驻留一个 TTSModule，合成串行
-_LOCK = threading.Lock()
 
 _MODE_LABELS = {
     Mode.CUSTOM_VOICE: "内置音色",
@@ -90,13 +98,45 @@ def _handoff_token() -> str:
 
 def run(config: Optional[str] = None, engine: Optional[str] = None,
         host: Optional[str] = None, port: Optional[int] = None) -> None:
-    """起界面 / Start the GUI. 同进程直调 `TTSModule`，不经 HTTP。"""
+    """
+    起一个**独立**的界面进程 / Start the GUI as its own process.
+
+    ⚠️ 它会自己造一个 `TTSModule`：和 HTTP 服务一起用就是**两份权重**。
+    两个都要的话用 `cli serve`（界面挂在 `/gui`，一份权重）。
+    """
     from agentic_tts.engine import TTSModule
 
     module = TTSModule(config)
     if engine:
         module.config.engine.backend = engine
 
+    build(module)
+    cfg = module.config.gui
+    ui.run(host=host or cfg.host, port=port or cfg.port, title="Agentic TTS",
+           reload=False, show=False, favicon="🎙️", dark=True)
+
+
+def mount(fastapi_app: Any, module: Any, *, path: str = "/gui") -> None:
+    """
+    把界面挂到已有的 FastAPI 应用上 / Mount the UI onto an existing FastAPI app.
+
+    **和 HTTP 服务共用同一个 `TTSModule`**，于是：一份权重、一把锁、
+    一个端口。调用方只要知道一个地址（`http://host:port/gui`）。
+    Sharing the module means one copy of the weights, one lock and one port.
+    """
+    build(module, mount_path=path.rstrip("/"))
+    ui.run_with(fastapi_app, mount_path=path, title="Agentic TTS",
+                favicon="🎙️", dark=True, show_welcome_message=False)
+
+
+def build(module: Any, *, mount_path: str = "") -> None:  # noqa: C901 - 界面装配
+    """
+    注册界面页面与静态路由 / Register the page and its static routes.
+
+    `mount_path`: 挂载前缀。挂到 `/gui` 之后，产物的静态路由在浏览器看到的是
+    `/gui/outputs/...` —— 播放器的 URL 必须带上这个前缀，否则 404。
+    Media URLs need the prefix once mounted, or the players 404.
+    """
     outputs = module.config.output_path
     outputs.mkdir(parents=True, exist_ok=True)
     # 产物目录挂成静态媒体，段落播放器才有 URL 可指
@@ -113,9 +153,10 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
         if not path:
             return None
         try:
-            return "/outputs/" + Path(path).resolve().relative_to(outputs.resolve()).as_posix()
+            relative = Path(path).resolve().relative_to(outputs.resolve()).as_posix()
         except ValueError:
             return None
+        return f"{mount_path}/outputs/{relative}"
 
     def open_folder(path: Optional[str]) -> None:
         """
@@ -255,7 +296,7 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                             name: Optional[str] = None):
             """跑一批合成 / Run one batch off the event loop。出错返回 None（已通知用户）。"""
             def work():
-                with _LOCK:
+                with module.lock:
                     return module.synthesize_many(
                         BatchSynthRequest(segments=requests, merge=merge,
                                           save_segments=True, name=name),
@@ -276,14 +317,18 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                     seg["running"] = False
                 refresh_all_chips()
 
-        def report_handoff(paths: list[str]) -> None:
+        def report_handoff(paths: list[str], *, done: bool = True) -> None:
             """
-            把产物清单写回交接单 / Write the produced files back to the hand-off record.
+            把进度与产物清单写回交接单 / Write progress and files back to the record.
 
             交接单是**跨进程**的（调用方轮询 HTTP 服务读它），所以这里只写文件，
             不做任何回调 —— 调用方可能在另一台机器上，我们连它在不在都不知道。
-            The caller polls the record over HTTP; it may be on another machine, so
-            nothing is pushed to it.
+            The caller polls the record over HTTP; it may be on another machine.
+
+            顺带写 `done` / `total`：调用方的等待动效就是靠这两个数字动起来的，
+            否则它只能显示一个「还在等」，和卡死看起来一样。
+            The counts drive the caller's progress bar; without them it can only show
+            an indeterminate "still waiting", which looks like a hang.
             """
             if not incoming:
                 return
@@ -296,7 +341,36 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                                  .relative_to(outputs.resolve()).as_posix())
                 except ValueError:
                     continue
-            handoff.update(outputs, incoming, status="done", files=files, run=session)
+            handoff.update(outputs, incoming,
+                           status="done" if done else "running",
+                           files=files, run=session,
+                           done=sum(1 for s in segments if s.get("path")),
+                           total=len(segments) or 1)
+
+        def offer_return() -> None:
+            """
+            回交接方的界面 / Go back to whoever handed the script over.
+
+            调用方在 `return_url` 里说了它自己在哪。生成完就该回去 ——
+            留在这个页面上，人还得自己找回原来那个标签页。
+            **优先关掉本标签页**（它是被 `window.open` 打开的，关得掉），
+            这样焦点自然回到原来那一页，也不会多出第二个调用方页面；
+            关不掉（比如手动粘贴 URL 打开的）再退回跳转。
+            Closing this script-opened tab returns focus to the original page without
+            creating a duplicate; navigation is the fallback when close is blocked.
+            """
+            record = handoff.read(outputs, incoming) if incoming else None
+            back = (record or {}).get("return_url") or ""
+            if not back:
+                return
+
+            ui.notify("产物已回传，正在返回…", type="positive")
+
+            def go() -> None:
+                ui.run_javascript("window.close()")
+                ui.navigate.to(back)
+
+            ui.timer(1.2, go, once=True)
 
         async def guarded(action, *, buttons: tuple = ()) -> None:
             """
@@ -733,11 +807,16 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                                f"音频 {sum(s.seconds for s in result.segments):.2f}s",
                                "ok" if result.ok else "err")
                     summary.set_text(f"产物目录 {result.output_dir}")
-                    report_handoff([s["path"] for s in segments if s.get("path")])
+                    # 逐段生成只**报进度**：调用方在人点「全部生成 / 合并」之前
+                    # 不该把半成品收走
+                    report_handoff([s["path"] for s in segments if s.get("path")],
+                                   done=False)
                     return result.ok
 
                 async def generate_all() -> None:
-                    await generate_indices(list(range(len(segments))))
+                    if await generate_indices(list(range(len(segments)))):
+                        report_handoff([s["path"] for s in segments if s.get("path")])
+                        offer_return()
 
                 async def merge_all() -> None:
                     """
@@ -800,6 +879,7 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                                         if merged.get("subtitle_path") else ""))
                     report_handoff([s["path"] for s in segments if s.get("path")]
                                    + [merged["path"], merged.get("subtitle_path")])
+                    offer_return()
 
                 bottom: list = []
                 with ui.row().classes("items-center gap-2 q-mt-sm"):
@@ -815,6 +895,21 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                         "合并成整段（复用已生成音频）",
                         on_click=lambda: guarded(merge_all, buttons=tuple(bottom)),
                     ).classes("tt-btn-alt"))
+                    # 只在「有人把稿子交过来」时出现：逐段试听调完就想回去交差，
+                    # 但没点「全部生成/合并」的话调用方还在等 —— 给一条明路。
+                    # Shown only for a hand-off: the caller is still waiting when the
+                    # user only generated pieces one by one.
+                    if incoming:
+                        def hand_back() -> None:
+                            paths = [s["path"] for s in segments if s.get("path")]
+                            if not paths:
+                                ui.notify("还没有任何音频可回传", type="warning")
+                                return
+                            report_handoff(paths)
+                            offer_return()
+
+                        bottom.append(ui.button("回传并返回", icon="reply",
+                                                on_click=hand_back).props("flat"))
                     ui.label(f"每段一个 wav + merged.wav，全部写在 {session}/") \
                         .classes("tt-hint")
 
@@ -844,9 +939,5 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                           f"生成完成后产物清单会自动回传",
                           type="positive", multi_line=True)
 
-    cfg = module.config.gui
-    ui.run(host=host or cfg.host, port=port or cfg.port, title="Agentic TTS",
-           reload=False, show=False, favicon="🎙️", dark=True)
 
-
-__all__ = ["run"]
+__all__ = ["build", "mount", "run"]

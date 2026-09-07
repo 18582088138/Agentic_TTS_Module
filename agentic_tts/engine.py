@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,6 +78,16 @@ class TTSModule:
         self.config = Config.load(config)
         self._engine: Optional[TTSEngine] = None
         self._voices: Optional[VoiceStore] = None
+
+        # 合成串行化用的锁 / the lock that serialises synthesis
+        #
+        # 放在这里而不是各调用方各拿一把：HTTP 服务与图形界面**同进程共用一个
+        # TTSModule**（GUI 挂在服务上，见 server/app.py）。各自一把锁的话，
+        # 界面里点生成的同时来一条 HTTP 请求，就会同时要两份权重 —— 8 GB 卡必然 OOM，
+        # 而 OOM 的报错完全看不出是这个原因。锁跟着模型走才不会漏。
+        # The HTTP service and the GUI share one module in one process; separate locks
+        # would let two synthesis runs demand two copies of the weights.
+        self.lock = threading.Lock()
 
     # ------------------------------------------------------------ 组件 / parts
 

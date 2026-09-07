@@ -358,8 +358,15 @@ def serve(
     port: Optional[int] = typer.Option(None, "--port"),
     config: Optional[str] = _CONFIG,
     engine: Optional[str] = _ENGINE,
+    gui: bool = typer.Option(True, "--gui/--no-gui",
+                             help="把图形界面挂在 /gui（默认挂，与服务共用一份权重）"),
 ) -> None:
-    """起 HTTP 服务 / Start the HTTP service."""
+    """
+    起 HTTP 服务（含图形界面）/ Start the HTTP service, GUI included.
+
+    图形界面挂在 `/gui`，**和服务共用同一个模型**：一个进程、一份权重、
+    一把锁、一个端口。另起一个 `cli gui` 进程会再加载一份权重。
+    """
     import uvicorn
 
     from agentic_tts.server.app import create_app
@@ -367,7 +374,11 @@ def serve(
     cfg = Config.load(config)
     if engine:
         cfg.engine.backend = engine
-    uvicorn.run(create_app(cfg), host=host or cfg.server.host, port=port or cfg.server.port)
+    bind_host = host or cfg.server.host
+    bind_port = port or cfg.server.port
+    if gui:
+        console.print(f"[dim]图形界面：http://{bind_host}:{bind_port}/gui[/dim]")
+    uvicorn.run(create_app(cfg, gui=gui), host=bind_host, port=bind_port)
 
 
 @app.command()
@@ -377,9 +388,16 @@ def gui(
     config: Optional[str] = _CONFIG,
     engine: Optional[str] = _ENGINE,
 ) -> None:
-    """起图形界面 / Start the GUI（同进程直调门面，不经 HTTP）。"""
+    """
+    只起图形界面 / Start the GUI alone（独立进程，直调门面）。
+
+    ⚠️ **它会自己加载一份权重。** 如果 HTTP 服务也在跑，那就是两份 ——
+    8 GB 卡上是实打实的内存压力。两个都要就只跑 `serve`（界面在 `/gui`）。
+    """
     from agentic_tts.gui.app import run
 
+    console.print("[yellow]提示：本命令会单独加载一份权重。"
+                  "若已在跑 serve，用它的 /gui 即可（共用一份）。[/yellow]")
     run(config=config, engine=engine, host=host, port=port)
 
 
