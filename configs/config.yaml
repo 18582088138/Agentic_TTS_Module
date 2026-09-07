@@ -1,0 +1,120 @@
+# Agentic TTS 配置 / configuration
+#
+# 模块的一切行为都由本文件决定。少数几项可用环境变量覆盖（部署时不必改文件）：
+#   TTS_BACKEND  TTS_DEVICE  TTS_DTYPE  TTS_SEED  TTS_MAX_RESIDENT
+#   TTS_MODELS_DIR  TTS_REPO_DIR  TTS_VOICES_DIR  TTS_OUTPUT_DIR
+#   TTS_SERVER_HOST  TTS_SERVER_PORT
+#
+# 相对路径一律**相对项目根**解析（本文件的上一级目录）。
+
+# ---------------- 引擎与设备 / engine and device ----------------
+engine:
+  # qwen3（默认，已实测）| sine（正弦波，离线自测用）| breeze2 / index2（未接入，占位）
+  backend: qwen3
+
+  # auto = 有 CUDA 就 cuda:0，否则 cpu。
+  # ⚠️ 实测结论：同一份模型在 CPU 与 GPU 上**输出不同**（贪心解码下第 38 步就分歧，
+  # 波形余弦 0.018），而同设备两次完全一致。所以换设备等于换音色细节，要用耳朵复核。
+  device: auto
+  # auto = cpu→float32 / cuda→bfloat16。8 GB 卡上 float32 需要约 9.5 GB，直接 OOM。
+  dtype: auto
+  attn_impl: eager            # eager | sdpa | flash_attention_2（后者要另装）
+
+  seed: 20260907
+
+  # ⭐ 轮动加载 / rotation：同时驻留几个 checkpoint。
+  # 实测一个 1.7B：bf16 权重 3.9 GB，跑起来约 5 GB。**8 GB 的 4060 装得下一个、
+  # 装不下两个**（光权重就 7.8 GB）。所以本机部署必须保持 1：换模式时先卸再载。
+  # 多段混用不同模式时，门面会按 checkpoint 分组执行，把轮动次数压到「模式数」。
+  max_resident: 1
+  vram_guard: true            # 加载前预检显存，不够就带修改建议直接报错
+
+  models_dir: "C:/Users/test/Downloads/xkd/Models"
+
+  # `qwen_tts` 源码目录。默认空 = 用本仓库内的 vendored 副本 third_party/qwen3_tts。
+  # ⚠️ 不要指向别的项目：环境里那份 `qwen-tts` editable 安装是坏的（finder 指向已删除
+  # 目录），且磁盘上有多份 commit 不同的源码，靠 cwd 碰运气会静默导入错的那一份。
+  repo_dir: ""
+
+  # checkpoint 配**目录名**，统一相对 models_dir 解析（改一个 models_dir 就整体搬家）
+  checkpoints:
+    custom_voice: Qwen3-TTS-12Hz-1.7B-CustomVoice
+    voice_design: Qwen3-TTS-12Hz-1.7B-VoiceDesign
+    base: Qwen3-TTS-12Hz-1.7B-Base
+
+  options: {}
+
+# ---------------- 文本链路 / text pipeline ----------------
+# 实测收益极不均匀（11 条 A/B，见 docs/00_research.md §2.3）：
+#   URL         CER 4.4286 → 0        ← 不做这一条会整段毁掉（模型逐字母念网址）
+#   Markdown    0.8261 → 0.1739
+#   单位量级     0.1613 → 0
+#   小数/emoji  0 → 0                 ← 做了白做，模型本来就读得对
+text:
+  prepare: true
+  markdown: true
+  urls: true
+  emoji: true
+  repeated_punct: true
+  numbers: true
+  abbreviations: true
+  # ⚠️ 词典替换会**把字换掉**（返回的文本只能送 TTS、不能显示给人看），
+  # 且内置词表尚未逐条实测 —— 保持关闭。
+  lexicon_polyphones: false
+  lexicon_proper_nouns: false
+
+  segment: true               # 分段的四条理由见 docs/01_design.md §4
+  max_chars: 60
+  min_chars: 8
+  events: true                # 解析 [pause:400ms] / [laugh] 之类标记
+
+# ---------------- 音频与节奏 / audio and rhythm ----------------
+# 没有 SSML，停顿只能靠「分段 + 插静音」——它是唯一确定性的节奏控制手段。
+audio:
+  sample_rate: null           # null = 用引擎原生采样率（跨引擎拼接时会统一）
+  format: wav
+  pause_ms: 300               # 同一角色的段间静音
+  role_change_pause_ms: 600   # 换角色的段间静音（要能听出换人）
+  event_pause_ms: 300         # [pause] 不带时长时的默认值
+  peak_normalize: false       # 只对拼接后的整条做归一才有意义，默认关
+
+# ---------------- 失控兜底 / runaway guard ----------------
+# 实测：模型会停不下来，产出几十秒噪声或静音**且不报错**，静音检测与波形指标都
+# 测不出来（41 秒噪声的 ASR 只回读出「嗯 k」）。主判据只能是「时长撞上限」。
+# ⚠️ 不要为了"稳定"去关采样：贪心解码 12 条里 7 条失控，官方采样默认值 0 条失控。
+guard:
+  enabled: true
+  retry: 1                    # 换种子重试次数
+  cap_ratio: 0.95             # 时长 ≥ 上限×此值 ⇒ 判失控
+  chars_per_sec: 5.0          # 中文约 5 字/秒（辅助判据，不依赖 max_new_tokens）
+  duration_ratio: 3.0
+
+# ---------------- 音色档案 / voice profiles ----------------
+voices:
+  dir: "./voices"
+  file: voices.yaml
+  default: null               # 未指定音色时用哪个档案；null = 交给模式推断
+  # 角色 → 音色。**按角色拆分多段文本必须配这张表**，否则拆出来的对白全用默认音色，
+  # 听起来所有人是同一个人且没有任何报错。GUI 也读它。
+  roles: {}
+  # 例：
+  # roles:
+  #   旁白: Serena
+  #   记者: Ryan
+
+# ---------------- 服务与界面 / service and GUI ----------------
+server:
+  host: 127.0.0.1
+  port: 8300
+gui:
+  host: 127.0.0.1
+  port: 8301
+
+output:
+  dir: "./outputs"
+  # 字幕导出：合并音频时顺带写一份 merged.srt，**一段音频一条字幕**，
+  # 时间轴含段间静音（漏算的话越往后字幕越提前）。
+  # 剪映 / Premiere / DaVinci 都能直接导入 SRT，所以不需要退化成 txt。
+  # 字幕文字用**原文去掉事件标记**，不是送进模型那份（预处理会删 URL、展开数字读法）。
+  subtitles: true
+  subtitle_format: srt        # 目前只支持 srt
