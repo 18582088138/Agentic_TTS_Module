@@ -1,0 +1,16 @@
+# 产物 / outputs —— 音频不进仓库
+outputs/
+*.wav
+*.mp3
+*.flac
+# 但示例参考音频的目录结构保留
+!voices/refs/.gitkeep
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.env
+.venv/

@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-tts"
+version = "0.1.0"
+description = "可插拔的本地 TTS 服务模块：Qwen3-TTS（torch cpu/cuda）+ 音色克隆/音色设计/vocal events"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+# ── torch 为什么不钉版本 ────────────────────────────────────────────────
+# 两台机器装的是不同的 wheel：开发机 `2.8.0+cpu`，4060 机器要 CUDA 版
+# （`pip install torch --index-url https://download.pytorch.org/whl/cu124`）。
+# 钉死版本会让 pip 在 4060 上把 CUDA 版换成 PyPI 默认版 —— 那是灾难。
+# 所以只给下界，**CUDA 版必须先手工装好，再 pip install -e .**（见 docs/05_deployment.md）。
+#
+# ── numpy 的上界不是我们定的 ────────────────────────────────────────────
+# 共用的 conda 环境里 funasr 硬钉 `numpy<2`。实测 torch / librosa / soundfile
+# 在 1.26 下全部正常，pip 关于 opencv 要 numpy>=2 的告警是元数据过严。
+dependencies = [
+    # 本模块自己的 / this module's own
+    "pydantic>=2.9",
+    "pydantic-settings>=2.4",
+    "PyYAML>=6.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "numpy>=1.26",
+    "soundfile>=0.12",
+
+    "torch>=2.4",
+
+    # 上游 qwen_tts 的运行时依赖（与 third_party/qwen3_tts 对齐）。
+    # 少任何一个都是「加载到一半才报 ImportError」，而加载要几十秒。
+    "transformers==4.57.3",
+    "accelerate>=1.12",
+    "einops>=0.8",
+    "librosa>=0.10",
+    "onnxruntime>=1.17",
+    "sox>=1.4",
+]
+
+[project.optional-dependencies]
+server = ["fastapi>=0.115", "uvicorn>=0.30", "python-multipart>=0.0.9"]
+gui = ["nicegui>=2.0"]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[project.scripts]
+tts = "agentic_tts.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agentic_tts*"]
+
+[tool.pytest.ini_options]
+# 默认**只跑离线用例**：真实模型每条几十秒起，不该混进日常 pytest。
+# 手动跑真实模型：python -m pytest tests -q -m real
+addopts = "-m 'not real'"
+markers = [
+    "real: 需要加载真实权重的用例（CPU 上每条几十秒起，手动触发）",
+]
+testpaths = ["tests"]
