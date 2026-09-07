@@ -109,6 +109,20 @@ python -m agentic_tts.gui --engine sine      # 不加载权重先看界面（正
 
 ---
 
+## 从别的应用导入文本（`?import=<token>`）
+
+打开 `http://127.0.0.1:8301/?import=<token>` 时，界面会：
+
+1. 读那张交接单（`outputs/handoff/<token>.json`，由 `POST /gui/handoff` 生成）
+2. **切到多段页签**，把每一段文本填进各自的文本框
+3. 交接单里带了 `voice` / `instruct` 就填进「统一声音配置」
+4. 之后**每次生成或合并完，都把产物清单写回那张交接单**（`status=done`），
+   调用方轮询即可取回
+
+找不到或已过期只弹一条提示，页面照常可用 —— 不该因为一个 URL 参数让界面起不来。
+
+DailyNewsAssistant 的「高级配置」开关走的就是这条路，见那边的 `docs/14_tts_guide.md`。
+
 ## 三条实现上的注意（改 GUI 前先看）
 
 1. **UI 必须建在 `@ui.page('/')` 里。** NiceGUI 对"自动首页"的实现是每来一个客户端就

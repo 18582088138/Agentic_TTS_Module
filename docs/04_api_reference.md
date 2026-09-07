@@ -81,6 +81,8 @@ python -m agentic_tts.server            # 默认 127.0.0.1:8300，交互文档�
 | `POST /tts/design` `POST /tts/clone` | 同上 | 语法糖，内部固定 mode |
 | `POST /tts/batch` | `BatchSynthRequest` + `encoding` | 每段路径 + 合并路径 |
 | `POST /tts/split` | `SplitRequest` | `{"segments":[{text,role,voice}]}` |
+| `POST /gui/handoff` | `segments[]`/`text` + `title`/`source`/`voice`/`instruct`/`meta` | `{"token","gui_url"}` |
+| `GET /gui/handoff/{token}` | — | 那张交接单（`status` / `files` / `run` / `meta`） |
 | `GET /outputs/{run}/{file}` | — | 取产物（路径解析后校验，挡目录穿越） |
 
 **状态码是有含义的**，调用方可以自动处置：
@@ -94,6 +96,30 @@ python -m agentic_tts.server            # 默认 127.0.0.1:8300，交互文档�
 
 ⚠️ **服务内只驻留一个 `TTSModule`，合成串行**（一把锁）：8 GB 卡上并发两条会同时要
 两份权重，必然 OOM，而 OOM 报错完全看不出是并发导致的。要并发就横向起多个进程/节点。
+
+### 交接单：把稿子交给 GUI 精修 / Handing a script to the GUI
+
+调用方（如 DailyNewsAssistant）想让人在**多段界面**里换音色、克隆、逐句重掷时：
+
+```
+POST /gui/handoff  {"segments": ["第一段。", "第二段。"], "source": "DNA"}
+   → {"token": "20260908-101530-a1b2c3", "gui_url": "http://127.0.0.1:8301/?import=…"}
+打开 gui_url            → 文本已经填进多段界面的各个文本框
+在界面里生成/合并       → GUI 把 status=done 与产物清单写回同一条记录
+GET /gui/handoff/{token} → files: ["gui-20260908-101601/merged.wav", …]
+GET /outputs/{run}/{file} → 取回产物
+```
+
+三条设计取舍 / Three decisions:
+
+- **落成文件**（`outputs/handoff/*.json`）而不是放内存：`cli serve` 与 `cli gui`
+  是**两个进程**，内存里的字典彼此看不见。
+- **由服务端落盘**：调用方可能在另一台机器上，写不了这台机器的磁盘，它只能发 HTTP。
+- **调用方轮询，服务端不回调**：TTS 这边不该知道调用方的地址，
+  调用方也不必为此开一个入站端口。
+
+token 出现在 URL 里并参与拼路径，因此**字符集是固定的**（`[A-Za-z0-9_-]{6,64}`）：
+不校验的话 `../../` 就能读写输出目录之外的文件。交接单 7 天过期，新建时顺手清理。
 
 客户端样例：`scripts/client.py`（零依赖、可直接拷进调用方项目）。
 

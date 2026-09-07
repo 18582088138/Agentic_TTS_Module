@@ -286,9 +286,45 @@ git commit -m "docs: git 分步提交指令汇总"
 ## 核对
 
 ```bash
-git log --oneline            # 应为 18 条
+git log --oneline            # 应为 19 条（含步骤 19）
 git status --short           # 应为空（outputs/ 已忽略）
 ```
 
 ⚠️ 不要 `git add -A` 一把梭：`outputs/` 已忽略，但 `voices/refs/` 下可能有你自己放的
 参考音频（人声素材），那是**不该进仓库**的东西。
+---
+
+## 步骤 19/19 · 交接单：把稿子交给 GUI 精修（2026-09-08）
+
+下游（DailyNewsAssistant）要能把稿子推进 TTS 的多段界面，人在那边精修完，
+产物清单再回传给它。**只加了一个模块、两个端点、GUI 的导入与回写**，
+合成链路一行未动。
+
+```bash
+cd /c/Users/test/Downloads/xkd/Agent_TTS_Module
+
+git add agentic_tts/core/handoff.py
+git add agentic_tts/server/app.py
+git add agentic_tts/gui/app.py
+git add tests/test_handoff.py
+git add docs/03_unit_tests.md docs/04_api_reference.md docs/07_gui_guide.md
+git add docs/08_git_commands.md
+
+git commit -m "feat(handoff): 交接单——外部应用把稿子推进多段界面，产物清单回传
+
+- core/handoff.py：outputs/handoff/<token>.json，落成文件而不是放内存，
+  因为 cli serve 与 cli gui 是两个进程，内存里的字典彼此看不见
+- 由服务端落盘：调用方可能在另一台机器上，它只能发 HTTP
+- token 出现在 URL 里并参与拼路径，字符集固定为 [A-Za-z0-9_-]{6,64}，
+  非法 token 一律当作不存在——不校验的话 ../../ 就能读写输出目录之外的文件
+- POST /gui/handoff 回 token 与现成的 gui_url；GET /gui/handoff/{token} 供轮询
+- GUI 认 ?import=<token>：切到多段页签、逐段填文本、填统一声音配置；
+  每次生成或合并完把 status=done 与产物清单写回同一条记录
+- 找不到交接单只提示、不报错——不该因为一个 URL 参数让页面起不来
+- 调用方轮询，这边不回调：TTS 不该知道调用方的地址
+- 离线单测 126 → 134 条"
+
+git status --short          # 预期：空（outputs/handoff/ 在 outputs 下，已忽略）
+```
+
+核对：`git log --oneline` 应为 19 条。

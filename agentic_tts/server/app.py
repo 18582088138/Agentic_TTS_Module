@@ -7,6 +7,8 @@ HTTP 服务 / HTTP service —— 端点与 `TTSModule` 的方法一一对应。
     POST /tts/design /tts/clone   语法糖，内部固定 mode
     POST /tts/batch         多段合成，每段落盘 + 可选拼接
     POST /tts/split         一整段文本 → 多段
+    POST /gui/handoff       把稿子交给 GUI 精修，回一个 token 与打开用的 URL
+    GET  /gui/handoff/{token}     查这张交接单（生成完 GUI 会写回产物清单）
     GET  /outputs/{run}/{file}    取产物
 
 ⚠️ **服务内只驻留一个 `TTSModule`，且合成是串行的**（一把锁）。
@@ -27,6 +29,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from agentic_tts.audio import io as audio_io
+from agentic_tts.core import handoff
 from agentic_tts.core.config import Config
 from agentic_tts.core.errors import CapabilityError, ConfigError, SynthError, TTSError
 from agentic_tts.core.logging import get_logger
@@ -58,6 +61,23 @@ class BatchBody(BatchSynthRequest):
 
 class VoiceBody(VoiceInfo):
     """新增/更新音色档案 / Upsert a voice profile."""
+
+
+class HandoffBody(BaseModel):
+    """
+    交接给 GUI 的稿子 / A script handed over to the GUI.
+
+    `segments` 直接对应多段界面的一个个文本框；只给 `text` 时当成一段。
+    """
+
+    segments: list[str] = Field(default_factory=list)
+    text: str = ""
+    title: str = ""
+    source: str = Field("", description="谁交过来的，只用于界面提示")
+    voice: Optional[str] = None
+    instruct: Optional[str] = None
+    meta: dict[str, Any] = Field(default_factory=dict,
+                                 description="调用方自己的上下文，原样带回")
 
 
 def _http_error(exc: TTSError) -> HTTPException:
@@ -203,6 +223,42 @@ def create_app(config: Config | str | None = None) -> FastAPI:
         return {"segments": [{"text": p.text, "role": p.role, "voice": p.voice}
                              for p in pieces]}
 
+    # ------------------------------------------------- 交接给 GUI / GUI hand-off
+
+    @app.post("/gui/handoff")
+    def create_handoff(body: HandoffBody) -> dict:
+        """
+        把一份稿子交给 GUI 精修 / Hand a script over to the GUI.
+
+        回一个 token 和现成的 URL，调用方打开它就能看到文本已经填进多段界面。
+        生成完 GUI 会把 `status=done` 与产物清单写回同一条记录（见 `core/handoff.py`），
+        调用方轮询 `GET /gui/handoff/{token}` 即可取回。
+        """
+        segments = [s for s in (body.segments or []) if s.strip()]
+        if not segments and body.text.strip():
+            segments = [body.text.strip()]
+        if not segments:
+            raise HTTPException(status_code=400, detail="交接单里没有任何文本")
+
+        token = handoff.create(module.config.output_path, {
+            "segments": segments,
+            "title": body.title,
+            "source": body.source,
+            "voice": body.voice,
+            "instruct": body.instruct,
+            "meta": body.meta,
+        })
+        gui = module.config.gui
+        return {"token": token,
+                "gui_url": f"http://{gui.host}:{gui.port}/?import={token}"}
+
+    @app.get("/gui/handoff/{token}")
+    def read_handoff(token: str) -> dict:
+        record = handoff.read(module.config.output_path, token)
+        if record is None:
+            raise HTTPException(status_code=404, detail="没有这张交接单（可能已过期）")
+        return record
+
     # ------------------------------------------------------------ 产物 / files
 
     @app.get("/outputs/{run}/{filename}")
@@ -224,4 +280,4 @@ def create_app(config: Config | str | None = None) -> FastAPI:
     return app
 
 
-__all__ = ["BatchBody", "SynthBody", "create_app"]
+__all__ = ["BatchBody", "HandoffBody", "SynthBody", "create_app"]

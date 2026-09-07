@@ -40,6 +40,7 @@ from nicegui import app as nicegui_app
 from nicegui import run as nicegui_run
 from nicegui import ui
 
+from agentic_tts.core import handoff
 from agentic_tts.core.errors import TTSError
 from agentic_tts.core.types import (
     BatchSynthRequest,
@@ -70,6 +71,21 @@ _SPLIT_LABELS = {
     SplitRule.ROLE: "按角色（角色：台词）",
     SplitRule.BLANK: "按空行",
 }
+
+
+def _handoff_token() -> str:
+    """
+    取 URL 上的 `?import=<token>` / Read the hand-off token off the URL.
+
+    别的应用（如 DailyNewsAssistant）把稿子 POST 到 `/gui/handoff` 拿到 token，
+    再打开 `GUI?import=<token>`，文本就直接落进多段界面 —— 不必让人复制粘贴一遍。
+    取不到就当普通打开，绝不因为这件事让页面起不来。
+    """
+    try:
+        request = ui.context.client.request
+        return str(request.query_params.get("import", "")) if request else ""
+    except Exception:                                 # noqa: BLE001 - 拿不到就算了
+        return ""
 
 
 def run(config: Optional[str] = None, engine: Optional[str] = None,
@@ -133,6 +149,8 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
 
         # 每个客户端一份状态 / per-client state
         session = module.new_run_name("gui")      # ② 一次会话共用一个产物目录
+        # `?import=<token>` 带进来的交接单（别的应用把稿子推过来，见 core/handoff.py）
+        incoming = _handoff_token()
         run_state: dict[str, Any] = {"busy": False, "started": 0.0, "label": "● 就绪"}
         # 工作线程只往这里写，UI 由 timer 读 —— 跨线程不直接碰 UI
         progress_box: dict[str, Any] = {"stamp": 0, "seen": 0, "index": None,
@@ -257,6 +275,28 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                 for seg in segments:
                     seg["running"] = False
                 refresh_all_chips()
+
+        def report_handoff(paths: list[str]) -> None:
+            """
+            把产物清单写回交接单 / Write the produced files back to the hand-off record.
+
+            交接单是**跨进程**的（调用方轮询 HTTP 服务读它），所以这里只写文件，
+            不做任何回调 —— 调用方可能在另一台机器上，我们连它在不在都不知道。
+            The caller polls the record over HTTP; it may be on another machine, so
+            nothing is pushed to it.
+            """
+            if not incoming:
+                return
+            files: list[str] = []
+            for path in paths:
+                if not path:
+                    continue
+                try:                     # 相对输出根，正好是 /outputs/{run}/{file} 的形状
+                    files.append(Path(path).resolve()
+                                 .relative_to(outputs.resolve()).as_posix())
+                except ValueError:
+                    continue
+            handoff.update(outputs, incoming, status="done", files=files, run=session)
 
         async def guarded(action, *, buttons: tuple = ()) -> None:
             """
@@ -458,6 +498,7 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                     single_state["path"] = result.path
                     single_open.set_visibility(bool(result.path))
                     single_info.set_text(result.path or "")
+                    report_handoff([result.path])
                     for warning in dict.fromkeys(w for s in result.segments for w in s.warnings):
                         ui.notify(warning, type="warning", multi_line=True, close_button=True)
 
@@ -692,6 +733,7 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                                f"音频 {sum(s.seconds for s in result.segments):.2f}s",
                                "ok" if result.ok else "err")
                     summary.set_text(f"产物目录 {result.output_dir}")
+                    report_handoff([s["path"] for s in segments if s.get("path")])
                     return result.ok
 
                 async def generate_all() -> None:
@@ -756,6 +798,8 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                     summary.set_text(merged["path"]
                                      + (f"　+ 字幕 {Path(merged['subtitle_path']).name}"
                                         if merged.get("subtitle_path") else ""))
+                    report_handoff([s["path"] for s in segments if s.get("path")]
+                                   + [merged["path"], merged.get("subtitle_path")])
 
                 bottom: list = []
                 with ui.row().classes("items-center gap-2 q-mt-sm"):
@@ -773,6 +817,32 @@ def run(config: Optional[str] = None, engine: Optional[str] = None,
                     ).classes("tt-btn-alt"))
                     ui.label(f"每段一个 wav + merged.wav，全部写在 {session}/") \
                         .classes("tt-hint")
+
+        # ------------------------------------------ 交接单导入 / hand-off import
+        #
+        # 放在最后：要用到上面定义的 `add_segment` / `unified` / `tabs`。
+        # 找不到交接单**只提示、不报错** —— 页面本身仍然是可用的。
+        if incoming:
+            record = handoff.read(outputs, incoming)
+            if record is None:
+                ui.notify(f"交接单 {incoming} 不存在或已过期，按普通模式打开",
+                          type="warning", multi_line=True)
+            else:
+                clear()
+                for piece in (t for t in record.get("segments") or [] if t.strip()):
+                    add_segment(piece)
+                voice = record.get("voice")
+                if voice and voice in voice_names:
+                    unified["voice"].set_value(voice)
+                if record.get("instruct") and can_instruct:
+                    unified["instruct"].set_value(record["instruct"])
+                tabs.set_value(tab_multi)
+                source = record.get("source") or "外部应用"
+                title = record.get("title") or ""
+                summary.set_text(f"来自 {source}　{title}".strip())
+                ui.notify(f"已导入 {len(segments)} 段（来自 {source}）　"
+                          f"生成完成后产物清单会自动回传",
+                          type="positive", multi_line=True)
 
     cfg = module.config.gui
     ui.run(host=host or cfg.host, port=port or cfg.port, title="Agentic TTS",
