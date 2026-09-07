@@ -1,0 +1,31 @@
+# 多段合成的输入样例 / Sample multi-segment input
+#
+#   python -m agentic_tts.cli batch samples/segments.yaml -n demo
+#
+# ⚠️ 这份样例用的是 qwen3 的内置音色（Serena / Ryan），换 `-e sine` 会因为
+# 「没有名为 Serena 的音色」而报错 —— 这是有意的：音色名拼错必须报错，
+# 不能静默回落到默认音色。想用 sine 试跑就把 voice 换成 test_female / test_male。
+#
+# 每段可以各带自己的模式/音色/指令/事件标记/段后停顿。
+# 混用不同模式时会按 checkpoint 分组执行（8 GB 卡上少轮动几次权重）。
+
+- text: "今天的人工智能资讯，[pause:400ms]三条重点。"
+  voice: Serena
+  role: 旁白
+  instruct: "语速平缓，播音腔"
+  pause_ms: 600
+
+- text: "第一条，通义千问发布了新的语音合成模型。"
+  voice: Ryan
+  role: 记者
+  language: Chinese
+
+# 音色设计：不需要参考音频，换 *-VoiceDesign 权重
+- text: "这项技术的落地速度超出预期。[laugh]"
+  mode: voice_design
+  instruct: "沉稳的中年女声，语速偏慢，语气克制"
+  role: 评论
+
+- text: "以上就是今天的全部内容，感谢收听。"
+  voice: Serena
+  role: 旁白
