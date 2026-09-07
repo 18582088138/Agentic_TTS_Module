@@ -1,0 +1,35 @@
+# 音色档案 / Voice profiles
+#
+# 一个名字 → 一套「用哪个模式、哪份权重、什么参数」。调用方只写 voice="xxx"。
+# ref_audio 的相对路径**相对本目录**解析（放到 voices/refs/ 下最省事）。
+#
+# 三种模式各绑一个 checkpoint，换模式 = 换权重（8 GB 卡上一次卸载+重载）：
+#   custom_voice → *-CustomVoice   voice_design → *-VoiceDesign   voice_clone → *-Base
+#
+# 内置音色（Serena / Vivian / Ryan …）不必在这里登记，直接 voice="Serena" 就能用；
+# 只有想给它换个别名或钉住语言时才写进来。
+
+# 播音腔女声：用内置音色 + 指令控制语速（instruct 在 1.7B 上实测有效，
+# 「语速平缓」与「偏快」时长差 30–42%，CER 不变差）
+anchor_f:
+  mode: custom_voice
+  speaker: Serena
+  language: Chinese
+  instruct: "语速平缓，播音腔，吐字清晰"
+  description: 资讯播报女声
+
+# 纯指令造音色：不需要任何参考音频
+calm_f:
+  mode: voice_design
+  instruct: "沉稳的中年女声，语速偏慢，语气克制，适合纪录片旁白"
+  language: Chinese
+  description: 纪录片旁白女声（音色设计）
+
+# 参考音频克隆的示例（**参考音频不在仓库里，需要自己放**）：
+# clone_demo:
+#   mode: voice_clone
+#   ref_audio: refs/my_voice.wav     # 相对本目录
+#   ref_text: "参考音频里说的原话，一字不差"   # ICL 模式必须给
+#   x_vector_only: false             # true = 只用 speaker embedding，不需要 ref_text
+#   language: Chinese
+#   description: 我自己的声音
