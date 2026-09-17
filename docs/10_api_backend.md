@@ -366,7 +366,7 @@ tts api-voice upload <wav>   # 上传参考音频，打印 voice_id
 | Q6 | VOCAL_EVENTS 声明 | 两个引擎都声明支持 |
 | Q7 | Vocal events 实际行为 | local 降级 / **API 走 MiniMax 2.8 原生标记** |
 | Q8 | 模型 | `speech-2.8-turbo`（默认，便宜）；`speech-2.8-hd`（高质量） |
-| Q9 | Endpoint | `https://api.minimax.chat` |
+| Q9 | Endpoint | `https://api.minimax.io` |
 | Q10 | fallback HTTP 返回码 | 200 + warnings |
 | Q11 | fallback 计数 | 暴露到 `/info` 端点 |
 | Q12 | 提交粒度 | 每落地步骤独立 commit |
