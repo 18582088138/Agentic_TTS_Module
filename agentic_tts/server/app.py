@@ -154,6 +154,50 @@ def create_app(config: Config | str | None = None, *,
     def engines() -> dict:
         return {"engines": module.engines()}
 
+    @app.get("/api/info")
+    def api_info() -> dict:
+        """API 配置（api_key mask）/ API config with masked key."""
+        api = module.config.api
+        key = api.api_key
+        masked = f"{key[:6]}***{key[-4:]}" if len(key) > 12 else ("***" if key else "")
+        return {
+            "enabled": api.enabled,
+            "provider": api.provider,
+            "endpoint": api.endpoint or "(default)",
+            "model": api.model,
+            "timeout_s": api.timeout_s,
+            "max_retries": api.max_retries,
+            "api_key_set": bool(key),
+            "api_key_masked": masked,
+            "voice_cache_path": api.voice_cache_path,
+            "fallback_enabled": api.fallback_enabled,
+            "fallback_count": module._fallback_count,
+            "engine_mode": module.engine_mode,
+        }
+
+    @app.get("/api/voice-cache")
+    def api_voice_cache() -> dict:
+        """列出 voice_id 缓存（不含敏感信息）/ List voice_id cache."""
+        from agentic_tts.engines.api.base import VoiceCache
+        from pathlib import Path
+        cache_path = Path(module.config.api.voice_cache_path)
+        if not cache_path.is_absolute():
+            from agentic_tts.core.config import PROJECT_ROOT
+            cache_path = PROJECT_ROOT / cache_path
+        if not cache_path.is_file():
+            return {"size": 0, "entries": []}
+        try:
+            cache = VoiceCache(cache_path)
+            entries = [
+                {"key": k, "voice_id": v.get("voice_id"),
+                 "provider": v.get("provider"), "ref_text": v.get("ref_text"),
+                 "uploaded_at": v.get("uploaded_at")}
+                for k, v in cache._data.items()  # noqa: SLF001
+            ]
+            return {"size": len(entries), "entries": entries}
+        except Exception as exc:  # noqa: BLE001
+            return {"size": 0, "entries": [], "error": str(exc)}
+
     @app.get("/capabilities")
     def capabilities() -> dict:
         return {"backend": module.config.engine.backend,

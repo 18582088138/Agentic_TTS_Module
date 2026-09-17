@@ -18,6 +18,7 @@ The CLI holds no logic; every command maps onto one facade method.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -399,6 +400,44 @@ def gui(
     console.print("[yellow]提示：本命令会单独加载一份权重。"
                   "若已在跑 serve，用它的 /gui 即可（共用一份）。[/yellow]")
     run(config=config, engine=engine, host=host, port=port)
+
+
+@app.command()
+def api_doctor(config: Optional[str] = _CONFIG) -> None:
+    """检查 API 配置 / Check API config（不真发请求）。"""
+    cfg = Config.load(config)
+    api = cfg.api
+    console.print(f"[bold]api.enabled:[/bold] {api.enabled}")
+    console.print(f"[bold]api.provider:[/bold] {api.provider}")
+    console.print(f"[bold]api.endpoint:[/bold] {api.endpoint or '(default)'}")
+    console.print(f"[bold]api.model:[/bold] {api.model}")
+    key = api.api_key or os.environ.get("MINIMAX_API_KEY") or os.environ.get("TTS_API_KEY", "")
+    if key:
+        masked = f"{key[:6]}***{key[-4:]}" if len(key) > 12 else "***"
+        console.print(f"[bold]api.api_key:[/bold] {masked} (length {len(key)})")
+    else:
+        console.print("[red]api.api_key: 未设置[/red]")
+        raise typer.Exit(1)
+    console.print(f"[bold]fallback_enabled:[/bold] {api.fallback_enabled}")
+    console.print("[green]配置 OK[/green]")
+
+
+@app.command(name="api-test")
+def api_test(
+    text: str = typer.Argument(..., help="要合成的文字"),
+    voice: Optional[str] = typer.Option(None, "--voice"),
+    config: Optional[str] = _CONFIG,
+) -> None:
+    """用 API 引擎合成一句 / Synth one utterance with the API engine."""
+    cfg = Config.load(config)
+    cfg.engine.backend = "api"
+    tts = TTSModule(cfg)
+    try:
+        r = tts.synthesize(SynthRequest(text=text, voice=voice), name="api-test")
+        console.print(f"[green]OK[/green]  {r.path}  {r.seconds:.2f}s  engine={r.engine.get('engine')}")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]FAIL:[/red] {exc}")
+        raise typer.Exit(2) from exc
 
 
 def main() -> None:
