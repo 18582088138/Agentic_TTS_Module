@@ -420,9 +420,14 @@ class TTSModule:
                      len(distinct), self.config.engine.max_resident)
         return sorted(range(len(modes)), key=lambda i: (distinct.index(modes[i]), i))
 
-    def _plan(self, req: SynthRequest, voice: ResolvedVoice) -> tuple[list[_Chunk], list[str]]:
+    def _plan(self, req: SynthRequest, voice: ResolvedVoice,
+             active_engine: Optional[TTSEngine] = None) -> tuple[list[_Chunk], list[str]]:
         """
         文本链路 / The text pipeline —— **事件标记 → 预处理 → 分段**。
+
+        `active_engine` 用于判定 native 事件支持：API 引擎声明 VOCAL_EVENTS 时
+        把 `[laugh]` 原样保留（让 MiniMax 2.8 走原生），否则走"删 + 转 instruct"降级。
+        缺省用默认引擎（兼容旧调用）。
 
         ⚠️ **顺序不能反。** 预处理放前面会把标记本身改掉：实测
         `[pause:500ms]` 被数字规范化写成 `[pause:五百毫秒]`，于是停顿悄悄消失、
@@ -437,7 +442,7 @@ class TTSModule:
 
         use_events = req.events if req.events is not None else cfg.text.events
         if use_events:
-            native = self.engine.supports(Capability.VOCAL_EVENTS)
+            native = (active_engine or self.engine).supports(Capability.VOCAL_EVENTS)
             pieces, event_warnings = parse_events(
                 req.text, default_pause_ms=cfg.audio.event_pause_ms, native=native)
             warnings.extend(event_warnings)
@@ -491,7 +496,7 @@ class TTSModule:
             self._fallback_engine(primary_engine.name)
             if primary_engine.name in ("api", "qwen3", "qwen3_tts", "sine") else None
         )
-        chunks, warnings = self._plan(req, voice)
+        chunks, warnings = self._plan(req, voice, active_engine=primary_engine)
 
         # 段种子固定为 base + 段序号：**单段重生成不影响其他段**，
         # 这是 GUI「只重做第 3 句」能用的前提。
