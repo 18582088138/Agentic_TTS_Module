@@ -118,3 +118,30 @@ output:
   # 字幕文字用**原文去掉事件标记**，不是送进模型那份（预处理会删 URL、展开数字读法）。
   subtitles: true
   subtitle_format: srt        # 目前只支持 srt
+
+# ---------------- API 后端 / API backend (optional) ----------------
+# 用 API 引擎做"过渡方案"：本地模型跑不动时切到云端 TTS（默认 MiniMax）。
+# 完整设计见 docs/10_api_backend.md。
+api:
+  enabled: false              # false = 不启用；启用后必须配 api_key 或环境变量 TTS_API_KEY
+
+  provider: minimax           # minimax | dashscope | openai | elevenlabs
+  endpoint: ""                # 空 = 用 provider 默认；自建代理可改
+  api_key: ""                 # 留空 = 必须从环境变量 TTS_API_KEY 读（推荐）
+  group_id: ""                # MiniMax 某些场景需要
+
+  timeout_s: 60               # 单次合成超时
+  max_retries: 2              # 5xx / 网络错误重试
+  retry_backoff_s: 1.0        # 指数退避基数
+
+  model: "speech-2.8-turbo"   # MiniMax 默认；其他 provider 自解析
+
+  voice_cache_path: "./voices/api_voice_cache.json"
+  rate_limit_per_min: 0       # 0 = 不限流
+
+  provider_options: {}        # provider 私有参数（如 OpenAI 的 organization）
+
+  # 自动 fallback：local 失败时自动用 API 重试一次
+  fallback_enabled: true
+  fallback_on_errors: ["engine_error", "synth_error"]
+  fallback_skip_voices: []

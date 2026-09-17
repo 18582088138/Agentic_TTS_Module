@@ -37,6 +37,19 @@ DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "config.yaml"
 _DTYPES = ("auto", "bfloat16", "float16", "float32")
 _ATTN_IMPLS = ("eager", "sdpa", "flash_attention_2")
 
+# API 后端供应商白名单 / API provider whitelist
+_API_PROVIDERS = ("minimax", "dashscope", "openai", "elevenlabs")
+
+
+def _str_to_bool(raw: str) -> bool:
+    """环境变量字符串转 bool / String to bool for env vars."""
+    s = str(raw).strip().lower()
+    if s in ("1", "true", "yes", "on", "y", "t"):
+        return True
+    if s in ("0", "false", "no", "off", "n", "f", ""):
+        return False
+    raise ValueError(f"无法解析为 bool：{raw!r}")
+
 
 class EngineConfig(BaseModel):
     """引擎与设备 / Engine and device."""
@@ -125,6 +138,28 @@ class ServerConfig(BaseModel):
     port: int = 8300
 
 
+class APIConfig(BaseModel):
+    """API 后端配置 / API backend config."""
+
+    enabled: bool = False
+    provider: str = "minimax"           # minimax | dashscope | openai | elevenlabs
+    endpoint: str = ""                  # 空 = 用 provider 默认
+    api_key: str = ""                   # 空 = 必须从环境变量读（MINIMAX_API_KEY 等）
+    group_id: str = ""                  # MiniMax 某些场景需要
+    timeout_s: int = 60
+    max_retries: int = 2
+    retry_backoff_s: float = 1.0
+    model: str = "speech-2.8-turbo"     # MiniMax 默认；不同 provider 自解析
+    voice_cache_path: str = "./voices/api_voice_cache.json"
+    rate_limit_per_min: int = 0         # 0 = 不限
+    provider_options: dict[str, Any] = Field(default_factory=dict)
+
+    # 自动 fallback 配置 / Auto fallback when local engine fails
+    fallback_enabled: bool = True
+    fallback_on_errors: list[str] = Field(default_factory=lambda: ["engine_error", "synth_error"])
+    fallback_skip_voices: list[str] = Field(default_factory=list)
+
+
 class GuiConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8301
@@ -157,6 +192,7 @@ class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     gui: GuiConfig = Field(default_factory=GuiConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    api: APIConfig = Field(default_factory=APIConfig)
 
     # -- 加载 / loading ------------------------------------------------------
 
@@ -217,6 +253,16 @@ class Config(BaseModel):
             "TTS_OUTPUT_DIR": (self.output, "dir", str),
             "TTS_SERVER_HOST": (self.server, "host", str),
             "TTS_SERVER_PORT": (self.server, "port", int),
+            # API 后端环境变量
+            "TTS_API_ENABLED": (self.api, "enabled", _str_to_bool),
+            "TTS_API_PROVIDER": (self.api, "provider", str),
+            "TTS_API_KEY": (self.api, "api_key", str),
+            "TTS_API_GROUP_ID": (self.api, "group_id", str),
+            "TTS_API_ENDPOINT": (self.api, "endpoint", str),
+            "TTS_API_TIMEOUT_S": (self.api, "timeout_s", int),
+            "TTS_API_MAX_RETRIES": (self.api, "max_retries", int),
+            "TTS_API_MODEL": (self.api, "model", str),
+            "TTS_API_FALLBACK": (self.api, "fallback_enabled", _str_to_bool),
         }
         for key, (section, attr, cast) in mapping.items():
             raw = env.get(key)
@@ -245,6 +291,13 @@ class Config(BaseModel):
             raise ConfigError(
                 f"text.max_chars({self.text.max_chars}) 必须大于 "
                 f"min_chars({self.text.min_chars})，否则分段会碎片化")
+        # API 校验
+        if self.api.enabled:
+            if self.api.provider not in _API_PROVIDERS:
+                raise ConfigError(
+                    f"api.provider={self.api.provider!r} 不合法　可选：{'、'.join(_API_PROVIDERS)}")
+            if self.api.timeout_s <= 0:
+                raise ConfigError("api.timeout_s 必须为正")
 
     # -- 派生路径 / derived paths --------------------------------------------
 
@@ -360,6 +413,7 @@ def ensure_qwen_tts_importable(repo_path: Path) -> Path:
 __all__ = [
     "DEFAULT_CONFIG",
     "PROJECT_ROOT",
+    "APIConfig",
     "AudioConfig",
     "Config",
     "EngineConfig",
