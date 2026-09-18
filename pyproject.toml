@@ -60,3 +60,7 @@ markers = [
     "real: 需要加载真实权重的用例（CPU 上每条几十秒起，手动触发）",
 ]
 testpaths = ["tests"]
+
+all = [
+    "agentic-tts[server,gui,dev]",
+]
