@@ -145,3 +145,13 @@ api:
   fallback_enabled: true
   fallback_on_errors: ["engine_error", "synth_error"]
   fallback_skip_voices: []
+
+# ---------------- API 后端 / API backend (optional) ----------------
+# 启用后用 MiniMax 云端 TTS（与 local 共存；config.engine.backend 仍是 local）
+api:
+  enabled: false
+  provider: minimax
+  endpoint: ""                # 空 = 按 api_key 前缀选（sk-cp → api.minimaxi.com）
+  api_key: ""                 # 留空 = 必须从环境变量 TTS_API_KEY 读
+  timeout_s: 60
+  model: speech-2.8-turbo

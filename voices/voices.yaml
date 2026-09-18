@@ -44,3 +44,11 @@ default_ref_voice:
   x_vector_only: false
   language: Chinese
   description: 默认参考音频（中文，31.7 秒）
+
+# 默认参考音频（你上传的 ref_audio_zh.mp3）—— voice_clone 时可用
+default_ref_voice:
+  mode: voice_clone
+  ref_audio: refs/ref_audio_zh.mp3
+  ref_text: "今天的人工智能资讯"
+  language: Chinese
+  description: 默认参考音频（中文，31.7s）
