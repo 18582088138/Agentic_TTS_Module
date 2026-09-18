@@ -202,12 +202,13 @@ class MiniMaxClient:
         resp = self._post("/v1/t2a_v2", body, timeout=self.config.api.timeout_s)
         _check_base_resp(resp)
 
-        # hex 字节 → bytes
-        audio_hex = resp.get("audio_file", "")
+        # 真实字段：data.audio（hex 编码）
+        data_obj = resp.get("data") or {}
+        audio_hex = data_obj.get("audio", "")
         try:
             audio_bytes = bytes.fromhex(audio_hex)
         except ValueError as exc:
-            raise APIBadRequestError(f"audio_file 非 hex: {audio_hex[:60]}…") from exc
+            raise APIBadRequestError(f"data.audio 非 hex: {audio_hex[:60]}…") from exc
 
         extra = resp.get("extra_info") or {}
         seconds = float(extra.get("audio_length", 0.0))

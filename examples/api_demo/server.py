@@ -126,7 +126,7 @@ async def t2a(client: httpx.AsyncClient, body: dict) -> bytes:
     data = r.json()
     if (data.get("base_resp") or {}).get("status_code", 0) != 0:
         raise HTTPException(400, f"MiniMax 业务错：{data['base_resp']}")
-    return bytes.fromhex(data["audio_file"])
+    return bytes.fromhex(data["data"]["audio"])
 
 
 @app.get("/api/info")

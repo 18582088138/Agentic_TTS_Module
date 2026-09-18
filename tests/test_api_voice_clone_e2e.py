@@ -63,9 +63,8 @@ def mock_minimax(monkeypatch):
         if "/t2a_v2" in url:
             synthesized["calls"] += 1
             return httpx.Response(200, json={
-                "audio_file": fake_wav.hex(),
-                "trace_id": "trace_001",
-                "extra_info": {"audio_length": 0.5, "audio_sample_rate": 24000},
+                "data": {"audio": fake_wav.hex(), "status": 2},
+                "extra_info": {"audio_length": 500, "audio_sample_rate": 24000},
                 "base_resp": {"status_code": 0, "status_msg": "success"},
             })
 
@@ -145,8 +144,8 @@ def test_voice_clone_with_native_event(mock_minimax, monkeypatch):
         if "/t2a_v2" in url and json:
             captured_text["value"] = json.get("text", "")
             return httpx.Response(200, json={
-                "audio_file": fake_wav.hex(),
-                "extra_info": {"audio_length": 0.5, "audio_sample_rate": 24000},
+                "data": {"audio": fake_wav.hex(), "status": 2},
+                "extra_info": {"audio_length": 500, "audio_sample_rate": 24000},
                 "base_resp": {"status_code": 0, "status_msg": "success"},
             })
         return httpx.Response(200, json={"file": {"file_id": 1},
