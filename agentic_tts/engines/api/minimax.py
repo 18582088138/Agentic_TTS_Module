@@ -35,8 +35,20 @@ from agentic_tts.engines.api.base import (
 
 _logger = logging.getLogger("api.minimax")
 
-# MiniMax 文档里的 base_url，二选一（看你账号所在区域）
-_DEFAULT_BASE = "https://api.minimax.io"  # 按 2026 官方文档
+# MiniMax 文档里的 base_url
+# - sk-api-*（按量付费、海外）：api.minimax.io
+# - sk-cp-*（Token Plan、国内）：api.minimaxi.com （注意是两个 i）
+_DEFAULT_BASE = "https://api.minimax.io"
+_SK_CP_BASE = "https://api.minimaxi.com"  # sk-cp key 走这个
+
+
+def _resolve_base(api_key: str, configured: str) -> str:
+    """根据 key 前缀选 endpoint，未配则取默认。"""
+    if configured:
+        return configured
+    if api_key.startswith("sk-cp-"):
+        return _SK_CP_BASE
+    return _DEFAULT_BASE
 
 # 2.8 原生 sound tags → 文档列出的 (xxx) 形式
 # 我们的 [laugh] [sigh] 等事件标记映射到这些
@@ -97,8 +109,6 @@ class MiniMaxClient:
 
     def __post_init__(self) -> None:
         api = self.config.api
-        self.base_url = api.endpoint or _DEFAULT_BASE
-        self.base_url = self.base_url.rstrip("/")
         # 鉴权三源：config → env TTS_API_KEY → MINIMAX_API_KEY
         key = api.api_key or os.environ.get("TTS_API_KEY") or os.environ.get("MINIMAX_API_KEY")
         if not key:
@@ -106,6 +116,8 @@ class MiniMaxClient:
                 "MiniMax API key 未配置　设环境变量 MINIMAX_API_KEY 或在 configs/config.yaml 的 api.api_key 填"
             )
         self._api_key = key
+        # endpoint：用户配置 > 按 key 前缀选
+        self.base_url = _resolve_base(key, api.endpoint).rstrip("/")
         self._group_id = api.group_id or os.environ.get("MINIMAX_GROUP_ID", "")
         # voice cache
         cache_path = Path(api.voice_cache_path)

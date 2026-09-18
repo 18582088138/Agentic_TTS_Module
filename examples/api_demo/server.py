@@ -28,8 +28,19 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 # MiniMax 配置
 MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY") or os.environ.get("TTS_API_KEY")
-MINIMAX_ENDPOINT = os.environ.get("MINIMAX_ENDPOINT", "https://api.minimax.io")
+MINIMAX_ENDPOINT_CFG = os.environ.get("MINIMAX_ENDPOINT", "")  # 空则按 key 前缀自动选
 MINIMAX_MODEL = os.environ.get("MINIMAX_MODEL", "speech-2.8-turbo")
+
+
+def _resolve_endpoint() -> str:
+    if MINIMAX_ENDPOINT_CFG:
+        return MINIMAX_ENDPOINT_CFG.rstrip("/")
+    if MINIMAX_API_KEY and MINIMAX_API_KEY.startswith("sk-cp-"):
+        return "https://api.minimaxi.com"
+    return "https://api.minimax.io"
+
+
+MINIMAX_ENDPOINT = _resolve_endpoint()
 
 CACHE_PATH = Path(os.environ.get("VOICE_CACHE_PATH", "/tmp/api_voice_cache.json"))
 CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -120,11 +131,18 @@ async def t2a(client: httpx.AsyncClient, body: dict) -> bytes:
 
 @app.get("/api/info")
 def info() -> dict:
+    # 按 key 前缀选 endpoint（与 agentic_tts.engines.api.minimax 同步）
+    if MINIMAX_ENDPOINT:
+        endpoint = MINIMAX_ENDPOINT
+    elif MINIMAX_API_KEY and MINIMAX_API_KEY.startswith("sk-cp-"):
+        endpoint = "https://api.minimaxi.com"
+    else:
+        endpoint = "https://api.minimax.io"
     return {
         "key_set": bool(MINIMAX_API_KEY),
         "key_masked": (MINIMAX_API_KEY[:6] + "***" + MINIMAX_API_KEY[-4:]
                        if MINIMAX_API_KEY else ""),
-        "endpoint": MINIMAX_ENDPOINT,
+        "endpoint": endpoint,
         "model": MINIMAX_MODEL,
         "voice_cache_size": len(_cache),
         "voice_cache_path": str(CACHE_PATH),
