@@ -36,7 +36,7 @@ from agentic_tts.engines.api.base import (
 _logger = logging.getLogger("api.minimax")
 
 # MiniMax 文档里的 base_url，二选一（看你账号所在区域）
-_DEFAULT_BASE = "https://api.minimax.chat"
+_DEFAULT_BASE = "https://api.minimax.io"  # 按 2026 官方文档
 
 # 2.8 原生 sound tags → 文档列出的 (xxx) 形式
 # 我们的 [laugh] [sigh] 等事件标记映射到这些

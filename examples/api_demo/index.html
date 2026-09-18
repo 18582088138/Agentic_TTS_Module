@@ -114,8 +114,8 @@
     <label style="margin-top:8px;">参考音频</label>
     <input type="file" id="ref-audio" accept="audio/*">
     <div class="meta" id="ref-info">未选</div>
-    <label style="margin-top:8px;">Ref Text (ICL 模式必填)</label>
-    <input id="ref-text" value="今天的人工智能资讯">
+    <label style="margin-top:8px;">Ref Text (可选，提升相似度)</label>
+    <input id="ref-text" value="" placeholder="留空 = 只用 speaker embedding">
   </div>
 </div>
 
@@ -180,12 +180,19 @@ document.querySelectorAll('[data-tag]').forEach(el => {
   });
 });
 
-// ref audio 上传 → base64
+// ref audio 上传 → base64 (分块，避免栈溢出)
 document.getElementById('ref-audio').addEventListener('change', async e => {
   const f = e.target.files[0];
   if (!f) return;
   const buf = await f.arrayBuffer();
-  refAudioBase64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const bytes = new Uint8Array(buf);
+  // 分块每 8192 字节转一次，避免 String.fromCharCode(...) 栈溢出
+  let binary = '';
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  refAudioBase64 = btoa(binary);
   document.getElementById('ref-info').innerHTML =
     `✓ ${f.name} (${(f.size/1024).toFixed(1)}KB)`;
 });

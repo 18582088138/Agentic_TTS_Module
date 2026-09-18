@@ -28,7 +28,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 # MiniMax 配置
 MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY") or os.environ.get("TTS_API_KEY")
-MINIMAX_ENDPOINT = os.environ.get("MINIMAX_ENDPOINT", "https://api.minimax.chat")
+MINIMAX_ENDPOINT = os.environ.get("MINIMAX_ENDPOINT", "https://api.minimax.io")
 MINIMAX_MODEL = os.environ.get("MINIMAX_MODEL", "speech-2.8-turbo")
 
 CACHE_PATH = Path(os.environ.get("VOICE_CACHE_PATH", "/tmp/api_voice_cache.json"))
@@ -88,15 +88,17 @@ async def upload_audio(client: httpx.AsyncClient, audio_bytes: bytes) -> int:
 
 
 async def clone_voice(client: httpx.AsyncClient, file_id: int, voice_id: str,
-                      text: str, model: str) -> str:
-    """POST /v1/voice_clone"""
+                      text: str | None, model: str) -> str:
+    """POST /v1/voice_clone（text 可选：留空则只用 speaker embedding）"""
     headers = {"Authorization": f"Bearer {MINIMAX_API_KEY}",
                "Content-Type": "application/json"}
-    body = {
-        "file_id": file_id, "voice_id": voice_id, "text": text, "model": model,
+    body: dict = {
+        "file_id": file_id, "voice_id": voice_id, "model": model,
         "language_boost": "auto", "need_noise_reduction": False,
         "need_volume_normalization": False,
     }
+    if text:
+        body["text"] = text  # 仅在用户提供 ref_text 时才加
     r = await client.post(f"{MINIMAX_ENDPOINT}/v1/voice_clone",
                           headers=headers, json=body, timeout=60)
     r.raise_for_status()
@@ -155,7 +157,7 @@ async def synthesize(req: SynthReq) -> dict:
                 voice_id = f"v_{key[:8]}_{int(time.time()) % 10**6:06d}"
                 voice_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in voice_id)[:64]
                 voice_id = await clone_voice(client, file_id, voice_id,
-                                            req.ref_text or "这是用于试听的声音克隆样本。",
+                                            req.ref_text,
                                             MINIMAX_MODEL)
                 _cache[key] = {"voice_id": voice_id, "provider": "minimax",
                                "ref_text": req.ref_text, "uploaded_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
