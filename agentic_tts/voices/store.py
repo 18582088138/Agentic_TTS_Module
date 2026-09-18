@@ -231,8 +231,10 @@ class VoiceStore:
             ref_audio = self.resolve_ref_audio(ref_audio)
             if not ref_audio:
                 raise ConfigError(f"音色 {name!r} 是克隆模式但没有 ref_audio")
-            # 注：MiniMax /v1/voice_clone 接口允许 ref_text 为空（只用 speaker embedding），
-            # 所以这里不再硬要求 ref_text（原先是给 Qwen3-TTS 的 ICL 模式强校验）
+            if not x_vector_only and not ref_text:
+                raise ConfigError(
+                    f"音色 {name!r} 走 ICL 克隆但没有 ref_text　"
+                    "补上参考音频的文字，或设 x_vector_only=true")
         if mode is Mode.VOICE_DESIGN and not instruct:
             raise ConfigError(f"音色 {name!r} 是音色设计模式但没有 instruct 描述")
 

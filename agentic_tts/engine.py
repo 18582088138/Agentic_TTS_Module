@@ -77,13 +77,7 @@ class TTSModule:
     def __init__(self, config: Config | str | Path | None = None) -> None:
         self.config = Config.load(config)
         self._engine: Optional[TTSEngine] = None
-        self._engine_cache: dict[str, TTSEngine] = {}   # 多引擎实例（按 backend 名缓存）
         self._voices: Optional[VoiceStore] = None
-        # 引擎档位：'local' | 'api' | 'auto'
-        # - 'local'/'api'：强制用对应引擎，失败报错（尊重显式选择，不 fallback）
-        # - 'auto'：优先 default backend，失败自动 fallback 到另一个引擎
-        self.engine_mode: str = "local"
-        self._fallback_count: int = 0
 
         # 合成串行化用的锁 / the lock that serialises synthesis
         #
@@ -99,50 +93,10 @@ class TTSModule:
 
     @property
     def engine(self) -> TTSEngine:
-        """默认引擎（首次访问时创建，**仍不加载权重**）。"""
+        """当前引擎（首次访问时创建，**仍不加载权重**）/ The engine, created lazily."""
         if self._engine is None:
-            self._engine = self._make_engine(self.config.engine.backend)
+            self._engine = create_engine(self.config.engine.backend, self.config)
         return self._engine
-
-    def _make_engine(self, backend: str) -> TTSEngine:
-        """按 backend 名取一个引擎实例，缓存避免重复创建。"""
-        cached = self._engine_cache.get(backend)
-        if cached is not None:
-            return cached
-        engine = create_engine(backend, self.config)
-        self._engine_cache[backend] = engine
-        return engine
-
-    def _pick_engine(self, req_backend: Optional[str] = None) -> TTSEngine:
-        """
-        按 engine_mode 选引擎：
-        - 'local' → 用 config.engine.backend（即默认引擎）
-        - 'api'   → 用 'api' backend
-        - 'auto'  → 用默认引擎；fallback 在 _synthesize_chunk 里
-        显式 req_backend 跳过 mode 选择，直接用指定引擎（尊重用户选择）。
-        """
-        if req_backend:
-            return self._make_engine(req_backend)
-        if self.engine_mode == "api":
-            return self._make_engine("api")
-        return self.engine
-
-    def _fallback_engine(self, primary_backend: str) -> Optional[TTSEngine]:
-        """auto 模式下，primary 失败后 fallback 到另一个引擎。"""
-        if self.engine_mode != "auto":
-            return None
-        if not self.config.api.enabled or not self.config.api.fallback_enabled:
-            return None
-        # 互为 fallback 的引擎对：local ↔ api
-        if primary_backend == "api":
-            return self._make_engine(self.config.engine.backend)
-        if primary_backend in ("qwen3", "qwen3_tts", "sine"):
-            # local 引擎失败 → 试 API
-            try:
-                return self._make_engine("api")
-            except Exception:  # noqa: BLE001
-                return None
-        return None
 
     @property
     def voices(self) -> VoiceStore:
@@ -169,29 +123,19 @@ class TTSModule:
     def info(self) -> dict[str, Any]:
         return {
             "backend": self.config.engine.backend,
-            "engine_mode": self.engine_mode,
             "engine": self.engine.info(),
-            "fallback_enabled": self.config.api.fallback_enabled,
-            "fallback_count": self._fallback_count,
             "text": self.config.text.model_dump(),
             "audio": self.config.audio.model_dump(),
             "guard": self.config.guard.model_dump(),
             "voices_file": str(self.config.voices_file),
             "output_dir": str(self.config.output_path),
             "roles": self.config.voices.roles,
-            "api": {
-                "enabled": self.config.api.enabled,
-                "provider": self.config.api.provider,
-                "model": self.config.api.model,
-            },
         }
 
     def release(self) -> None:
-        """卸载所有引擎的权重、释放显存 / Unload weights and free memory."""
-        for engine in self._engine_cache.values():
-            engine.release()
-        self._engine_cache.clear()
-        self._engine = None
+        """卸载权重、释放显存 / Unload weights and free memory."""
+        if self._engine is not None:
+            self._engine.release()
 
     def __enter__(self) -> "TTSModule":
         return self
@@ -420,14 +364,9 @@ class TTSModule:
                      len(distinct), self.config.engine.max_resident)
         return sorted(range(len(modes)), key=lambda i: (distinct.index(modes[i]), i))
 
-    def _plan(self, req: SynthRequest, voice: ResolvedVoice,
-             active_engine: Optional[TTSEngine] = None) -> tuple[list[_Chunk], list[str]]:
+    def _plan(self, req: SynthRequest, voice: ResolvedVoice) -> tuple[list[_Chunk], list[str]]:
         """
         文本链路 / The text pipeline —— **事件标记 → 预处理 → 分段**。
-
-        `active_engine` 用于判定 native 事件支持：API 引擎声明 VOCAL_EVENTS 时
-        把 `[laugh]` 原样保留（让 MiniMax 2.8 走原生），否则走"删 + 转 instruct"降级。
-        缺省用默认引擎（兼容旧调用）。
 
         ⚠️ **顺序不能反。** 预处理放前面会把标记本身改掉：实测
         `[pause:500ms]` 被数字规范化写成 `[pause:五百毫秒]`，于是停顿悄悄消失、
@@ -442,7 +381,7 @@ class TTSModule:
 
         use_events = req.events if req.events is not None else cfg.text.events
         if use_events:
-            native = (active_engine or self.engine).supports(Capability.VOCAL_EVENTS)
+            native = self.engine.supports(Capability.VOCAL_EVENTS)
             pieces, event_warnings = parse_events(
                 req.text, default_pause_ms=cfg.audio.event_pause_ms, native=native)
             warnings.extend(event_warnings)
@@ -487,16 +426,8 @@ class TTSModule:
     def _synthesize_one(self, req: SynthRequest, voice: ResolvedVoice, index: int,
                         out_dir: Optional[Path]) -> SegmentResult:
         """一段（可能内部多块）的完整流程 / One segment end to end."""
-        # 按 req.engine / engine_mode 选引擎；fallback 在 _synthesize_chunk 内
-        primary_engine = self._pick_engine(req.engine)
-        primary_engine.require_mode(voice.mode)
-        # 暴露给 _synthesize_chunk 用
-        self._active_primary_engine = primary_engine
-        self._active_fallback_engine = (
-            self._fallback_engine(primary_engine.name)
-            if primary_engine.name in ("api", "qwen3", "qwen3_tts", "sine") else None
-        )
-        chunks, warnings = self._plan(req, voice, active_engine=primary_engine)
+        self.engine.require_mode(voice.mode)
+        chunks, warnings = self._plan(req, voice)
 
         # 段种子固定为 base + 段序号：**单段重生成不影响其他段**，
         # 这是 GUI「只重做第 3 句」能用的前提。
@@ -514,7 +445,7 @@ class TTSModule:
 
         for offset, chunk in enumerate(chunks):
             started = time.perf_counter()
-            raw, used_retries, verdict, fallback_triggered = self._synthesize_chunk(
+            raw, used_retries, verdict = self._synthesize_chunk(
                 chunk, voice, base_seed + offset * 1_000, req.gen)
             synth_seconds += time.perf_counter() - started
             retries += used_retries
@@ -558,77 +489,40 @@ class TTSModule:
             instruct_applied=instruct_applied, warnings=warnings, path=path, wav=wav)
 
     def _synthesize_chunk(self, chunk: _Chunk, voice: ResolvedVoice, seed: int,
-                          gen: dict[str, Any]) -> tuple[Any, int, str, bool]:
+                          gen: dict[str, Any]) -> tuple[Any, int, str]:
         """
-        合成一块，带失控重试 + auto 模式 fallback / Synthesise with retries + fallback.
+        合成一块，带失控重试 / Synthesise one chunk with runaway retries.
 
         返回 / Returns:
-            `(RawAudio | None, 重试次数, 失败原因, fallback_triggered)`。
+            `(RawAudio | None, 重试次数, 失败原因)`。
+
+        失控的处置是**换种子重试**，不是关采样 —— 实测贪心解码更容易失控。
         """
         cfg = self.config.guard
         attempts = cfg.retry + 1 if cfg.enabled else 1
         reason = ""
-        primary_engine = self._pick_engine(
-            self._active_backend if hasattr(self, "_active_backend") else None
-        )
-        # 简化：直接复用本段 primary（由 _synthesize_one 决定）
-        primary_engine = self._active_primary_engine  # 由 _synthesize_one 注入
 
         for attempt in range(attempts):
             used_seed = seed if attempt == 0 else guard_mod.next_seed(seed, attempt)
-            try:
-                raw = primary_engine.synthesize(SynthChunk(
-                    text=chunk.text, mode=voice.mode, language=voice.language,
-                    speaker=voice.speaker, instruct=chunk.instruct,
-                    ref_audio=voice.ref_audio, ref_text=voice.ref_text,
-                    x_vector_only=voice.x_vector_only, gen=dict(gen), seed=used_seed))
-            except SynthError as exc:
-                # 仅在 auto 模式 + 配置允许时尝试 fallback
-                fb_engine = self._active_fallback_engine
-                if fb_engine is None:
-                    return None, attempt, str(exc), False
-                _logger.warning("primary 引擎失败（%s），自动 fallback 到 %s",
-                                exc, fb_engine.name)
-                try:
-                    raw = fb_engine.synthesize(SynthChunk(
-                        text=chunk.text, mode=voice.mode, language=voice.language,
-                        speaker=voice.speaker, instruct=chunk.instruct,
-                        ref_audio=voice.ref_audio, ref_text=voice.ref_text,
-                        x_vector_only=voice.x_vector_only, gen=dict(gen), seed=used_seed))
-                except SynthError as exc2:
-                    return None, attempt, f"{exc} | fallback 也失败: {exc2}", False
-                # fallback 成功：给 raw 加 warning + 计数 +1
-                self._fallback_count += 1
-                fb_warning = f"本段由 {fb_engine.name} 引擎 fallback 生成（原失败：{exc}）"
-                raw.warnings = list(raw.warnings or []) + [fb_warning]
-                _logger.info("fallback 成功 engine=%s", fb_engine.name)
-                # 失控判据继续
-                if not cfg.enabled:
-                    return raw, attempt, "", True
-                verdict = guard_mod.check_runaway(
-                    raw.seconds, chunk.text,
-                    cap_seconds=fb_engine.duration_cap_seconds(gen),
-                    cap_ratio=cfg.cap_ratio, chars_per_sec=cfg.chars_per_sec,
-                    duration_ratio=cfg.duration_ratio)
-                if not verdict:
-                    return raw, attempt, "", True
-                reason = verdict.reason
-                continue
-
-            # primary 成功 → 走原失控判据
+            raw = self.engine.synthesize(SynthChunk(
+                text=chunk.text, mode=voice.mode, language=voice.language,
+                speaker=voice.speaker, instruct=chunk.instruct,
+                ref_audio=voice.ref_audio, ref_text=voice.ref_text,
+                x_vector_only=voice.x_vector_only, gen=dict(gen), seed=used_seed))
             if not cfg.enabled:
-                return raw, attempt, "", False
+                return raw, attempt, ""
+
             verdict = guard_mod.check_runaway(
                 raw.seconds, chunk.text,
-                cap_seconds=primary_engine.duration_cap_seconds(gen),
+                cap_seconds=self.engine.duration_cap_seconds(gen),
                 cap_ratio=cfg.cap_ratio, chars_per_sec=cfg.chars_per_sec,
                 duration_ratio=cfg.duration_ratio)
             if not verdict:
-                return raw, attempt, "", False
+                return raw, attempt, ""
             reason = verdict.reason
             _logger.warning("疑似失控（%s），换种子重试 %d/%d", reason, attempt + 1, cfg.retry)
 
-        return None, attempts - 1, reason, False
+        return None, attempts - 1, reason
 
     def _assemble(self, segments: list[SegmentResult], request: BatchSynthRequest,
                   out_dir: Optional[Path], elapsed: float) -> SynthResult:

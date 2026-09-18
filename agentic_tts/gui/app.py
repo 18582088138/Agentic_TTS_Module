@@ -393,41 +393,7 @@ def build(module: Any, *, mount_path: str = "") -> None:  # noqa: C901 - 界面�
                 for button in buttons:
                     button.enable()
 
-        # ------------------------------------------------- 顶栏 / header
-        # 三档引擎开关 + 状态指示 + fallback 计数
-        engine_mode_state: dict[str, Any] = {"current": module.engine_mode}
-        fallback_indicator = ui.label("").classes("text-xs text-orange-400 hidden")
-        fallback_count_label = ui.label(f"fallback: {module._fallback_count}").classes("text-xs text-grey-5")
-
-        def refresh_fallback_count() -> None:
-            fallback_count_label.set_text(f"fallback: {module._fallback_count}")
-            if engine_mode_state["current"] == "auto":
-                fallback_indicator.classes(remove="hidden")
-                fallback_indicator.set_text("⚡ auto 模式：local 失败会自动 fallback 到 API")
-            else:
-                fallback_indicator.classes(add="hidden")
-
-        ui.timer(2.0, refresh_fallback_count)
-
-        def set_engine_mode(mode: str) -> None:
-            if mode == engine_mode_state["current"]:
-                return
-            engine_mode_state["current"] = mode
-            module.engine_mode = mode
-            _logger.info("engine mode → %s", mode)
-            ui.notify(f"引擎档位：{mode}", type="info")
-
-        with ui.row().classes("items-center gap-2 w-full"):
-            ui.label("引擎").classes("text-sm text-grey-4")
-            engine_btn_group = ui.button_group().props("push glossy").classes("gap-1")
-            for m, label in [("local", "Local"), ("api", "API"), ("auto", "Auto (Fallback)")]:
-                btn = engine_btn_group.button(label)
-                if m == engine_mode_state["current"]:
-                    btn.props("color=primary")
-                btn.on_click(lambda _, mode=m: set_engine_mode(mode))
-            ui.space()
-            fallback_indicator  # 占位：fallback 触发时显示
-            fallback_count_label
+        # ------------------------------------------------- 控件组 / controls
 
         async def on_upload(event: Any, state: dict[str, Any]) -> None:
             """

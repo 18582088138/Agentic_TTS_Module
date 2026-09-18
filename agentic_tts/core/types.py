@@ -75,12 +75,10 @@ class SynthRequest(BaseModel):
 
     `mode` 留空则按参数推断（见 `infer_mode`）；参数与 `mode` 冲突时**直接报错**，
     不做静默忽略。
-    `engine` 留空则用 config.engine.backend；显式指定时按此引擎合成（不触发 fallback）。
     """
 
     text: str = Field(min_length=1)
     mode: Optional[Mode] = None
-    engine: Optional[str] = None           # None = 用 config.engine.backend；显式值跳过 fallback
     voice: Optional[str] = None            # 内置音色名，或 voices.yaml 里的档案名
     language: str = "Chinese"
     instruct: Optional[str] = None
