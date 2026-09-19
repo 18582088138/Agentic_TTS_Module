@@ -33,6 +33,30 @@ _logger = get_logger("config")
 # 本文件位于 agentic_tts/core/config.py，上溯两层即项目根
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "config.yaml"
+DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def _load_dotenv_if_present() -> None:
+    """
+    把项目根的 `.env` 灌进 `os.environ`，**不**覆盖同名系统环境变量。
+
+    `.env` 是密钥的默认存放点（与 DailyNewsAssistant 一致：密钥只从 .env 读，代码零硬编码）。
+    Keys live only in `.env`; nothing hard-coded in source.
+
+    子进程（被 DNA supervisor 拉起的 TTS 服务）不继承 DNA 的 `os.environ`，
+    必须自己加载自己的 `.env`；两边在各自进程里互不干扰。
+    Children spawned by the supervisor do not inherit DNA's `os.environ`,
+    so they must read their own `.env`.
+    """
+    path = DEFAULT_ENV_FILE
+    if not path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv          # python-dotenv 是软依赖：缺它仅退到 env-var
+        load_dotenv(dotenv_path=path, override=False, encoding="utf-8")
+        _logger.debug(".env 已加载：%s", path)
+    except ImportError:
+        _logger.debug("python-dotenv 未安装，仅依赖系统环境变量")
 
 _DTYPES = ("auto", "bfloat16", "float16", "float32")
 _ATTN_IMPLS = ("eager", "sdpa", "flash_attention_2")
@@ -183,6 +207,11 @@ class Config(BaseModel):
         """
         读配置 / Load the configuration.
 
+        顺序 / Order:
+            1. `.env`（项目根，**不**覆盖进程已有环境变量）—— 密钥默认来源
+            2. `configs/config.yaml`（非敏感项：引擎、设备、端口……）
+            3. 进程环境变量（**最高**优先级，便于部署/CI 临时覆盖）
+
         参数 / Args:
             source: `Config` 原样返回；路径读该文件；None 读
                 `configs/config.yaml`（不存在则全用默认值）。
@@ -195,6 +224,10 @@ class Config(BaseModel):
         """
         if isinstance(source, Config):
             return source
+
+        # 先把 `.env` 灌进 os.environ，**不**覆盖系统已有的同名变量
+        # —— 部署/CI 临时通过环境变量传的 `TTS_API_KEY` 必须仍然赢。
+        _load_dotenv_if_present()
 
         path = Path(source) if source else DEFAULT_CONFIG
         data: dict[str, Any] = {}
@@ -229,13 +262,16 @@ class Config(BaseModel):
             "TTS_DTYPE": (self.engine, "dtype", str),
             "TTS_SEED": (self.engine, "seed", int),
             "TTS_MAX_RESIDENT": (self.engine, "max_resident", int),
+            # API 后端覆盖（密钥在 .env，endpoint/model 偶尔也会临时改）
+            "TTS_API_KEY": (self.api, "api_key", str),
+            "TTS_API_ENDPOINT": (self.api, "endpoint", str),
+            "TTS_API_MODEL": (self.api, "model", str),
             "TTS_MODELS_DIR": (self.engine, "models_dir", str),
             "TTS_REPO_DIR": (self.engine, "repo_dir", str),
             "TTS_VOICES_DIR": (self.voices, "dir", str),
             "TTS_OUTPUT_DIR": (self.output, "dir", str),
             "TTS_SERVER_HOST": (self.server, "host", str),
             "TTS_SERVER_PORT": (self.server, "port", int),
-            "TTS_API_KEY": (self.api, "api_key", str),
         }
         for key, (section, attr, cast) in mapping.items():
             raw = env.get(key)

@@ -121,10 +121,14 @@ output:
 
 # ---------------- API 后端 / API backend (optional) ----------------
 # 启用后用 MiniMax 云端 TTS（与 local 共存；config.engine.backend 仍是 local）
+#
+# ⚠️ `api_key` **不再写在这里**。密钥只从项目根的 `.env` 读，代码零硬编码；
+#   与 DailyNewsAssistant 的约定一致，`.env` 按 `.gitignore` 不入库。
+#   The key is read from `.env` at the project root (matches DNA's convention).
 api:
-  enabled: false
+  enabled: true
   provider: minimax
   endpoint: ""
-  api_key: ""
+  # api_key:    # 留空或整段删掉均可；服务运行时从 env `TTS_API_KEY` / `.env` 读
   timeout_s: 60
   model: speech-2.8-turbo
