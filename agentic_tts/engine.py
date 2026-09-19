@@ -93,9 +93,20 @@ class TTSModule:
 
     @property
     def engine(self) -> TTSEngine:
-        """当前引擎（首次访问时创建，**仍不加载权重**）/ The engine, created lazily."""
+        """
+        当前引擎（首次访问时创建，**仍不加载权重**）/ The engine, created lazily.
+
+        API 优先：若 ``api.enabled``，按 ``api.provider`` 选 API 引擎
+        （如 ``minimax``），否则才走本地 ``engine.backend``。
+        API takes precedence when ``api.enabled`` is true; otherwise local backend is used.
+        """
         if self._engine is None:
-            self._engine = create_engine(self.config.engine.backend, self.config)
+            backend = (
+                self.config.api.provider
+                if self.config.api.enabled
+                else self.config.engine.backend
+            )
+            self._engine = create_engine(backend, self.config)
         return self._engine
 
     @property

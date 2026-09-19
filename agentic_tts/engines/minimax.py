@@ -30,6 +30,23 @@ _ENDPOINT_BY_KEY = {
 }
 _DEFAULT_ENDPOINT = "https://api.minimax.io"  # 海外按量付费
 
+# 跨区域时按这个顺序兜底 —— _pick_endpoint 之外、用户未配置时也带着。
+# Cross-region fallback order.
+_FALLBACK_ENDPOINTS = (
+    "https://api.minimaxi.com",
+    "https://api.minimax.io",
+)
+
+# 业务层鉴权/账号错码：换 endpoint 或许能恢复。其它错误（参数、配额、限流）不切。
+# Auth/account codes that may be resolved by switching endpoint.
+_AUTH_STATUS_CODES = {
+    2049,    # invalid api key
+    2048,    # auth failed
+    1004,    # authentication error
+    1002,    # invalid authorization
+    1008,    # payment required (key 绑在另一个账户上)
+}
+
 
 def _pick_endpoint(api_key: str, configured: str) -> str:
     if configured:
@@ -76,7 +93,9 @@ class MiniMaxEngine(TTSEngine):
         key = api.api_key or _get_api_key_from_env()
         if not key:
             raise EngineError(
-                "MiniMax API key 未配置：设环境变量 TTS_API_KEY 或在 configs/config.yaml 的 api.api_key 填"
+                "MiniMax API key 未配置：在项目根的 .env 里设 TTS_API_KEY=sk-…，"
+                "或临时 `export TTS_API_KEY=…` 后再启动服务。"
+                "代码与 config.yaml 都不再持有密钥（与 DailyNewsAssistant 一致）。"
             )
         self._api_key = key
         self.base_url = _pick_endpoint(key, api.endpoint)
@@ -126,25 +145,80 @@ class MiniMaxEngine(TTSEngine):
 
         body = self._build_request(chunk, voice_id)
 
-        started = time.perf_counter()
-        try:
-            import httpx
-            with httpx.Client(timeout=self.timeout_s) as client:
-                resp = client.post(
-                    f"{self.base_url}/v1/t2a_v2",
-                    headers={"Authorization": f"Bearer {self._api_key}",
-                             "Content-Type": "application/json"},
-                    json=body,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as exc:
-            raise SynthError(f"MiniMax 调用失败：{exc}") from exc
-        elapsed = time.perf_counter() - started
+        # 端点候选：用户配置的优先；其它按白名单顺序作为备用。
+        # Endpoint candidates: configured first; then whitelist as fallback.
+        # 这样 key 跨域（Token Plan key 配到海外 endpoint、或反之）能自动恢复。
+        # Switching on auth errors lets a misrouted key still recover automatically.
+        candidates = self._endpoint_candidates()
+        attempts_log: list[str] = []
 
-        if (data.get("base_resp") or {}).get("status_code", 0) != 0:
-            msg = data["base_resp"].get("status_msg", "")
-            raise SynthError(f"MiniMax 业务错：{msg}")
+        import httpx
+        last_exc: Exception | None = None
+        for idx, ep in enumerate(candidates):
+            # 同一端点最多 1 次网络层重试（connect/read timeout 等瞬时错误），
+            # 再不行就换下一个端点。鉴权错误（见 _AUTH_STATUS_CODES）直接换端点不重试。
+            for transport_retry in range(2):
+                started = time.perf_counter()
+                try:
+                    # 连接 5s 与读取超时分开：VPN/DNS 阻塞时不能把读超时也拖到 timeout_s
+                    timeouts = httpx.Timeout(connect=5.0, read=self.timeout_s,
+                                             write=self.timeout_s, pool=5.0)
+                    with httpx.Client(timeout=timeouts) as client:
+                        resp = client.post(
+                            f"{ep}/v1/t2a_v2",
+                            headers={"Authorization": f"Bearer {self._api_key}",
+                                     "Content-Type": "application/json"},
+                            json=body,
+                        )
+                    data = resp.json()
+                    elapsed = time.perf_counter() - started
+                except (httpx.ConnectError, httpx.ConnectTimeout,
+                        httpx.ReadTimeout, httpx.WriteTimeout,
+                        httpx.PoolTimeout, httpx.NetworkError) as exc:
+                    last_exc = exc
+                    attempts_log.append(f"{ep}/transport:{type(exc).__name__}")
+                    _logger.warning("MiniMax transport @%s: %s（第 %d 次）",
+                                    ep, exc, transport_retry + 1)
+                    if transport_retry == 1:
+                        break                       # 该端点两次都失败，跳到下一个端点
+                    time.sleep(0.6 * (transport_retry + 1))
+                    continue
+                except Exception as exc:             # JSON 解析等真·异常，不再重试
+                    raise SynthError(f"MiniMax 调用失败：{exc}") from exc
+
+                code = int((data.get("base_resp") or {}).get("status_code", 0) or 0)
+                if code == 0:
+                    break                           # 成功；跳出 transport_retry 循环
+                if code in _AUTH_STATUS_CODES:
+                    attempts_log.append(f"{ep}/auth:{code}")
+                    _logger.warning("MiniMax auth 失败 @%s: code=%s msg=%s —— 尝试备用端点",
+                                    ep, code,
+                                    (data.get("base_resp") or {}).get("status_msg", ""))
+                    break                           # 直接试下一端点（不耗 transport_retry）
+                # 业务错（参数、配额、限流等）—— 不重试也不换端点
+                msg = (data.get("base_resp") or {}).get("status_msg", "")
+                raise SynthError(
+                    f"MiniMax 业务错（{ep}）：{code} {msg}".rstrip()
+                )
+            else:
+                # transport_retry for 循环正常结束（没 break）= 两次都 transport 失败
+                continue
+            # 走到这里说明已经 break（成功或换端点）
+            if (data.get("base_resp") or {}).get("status_code", 0) == 0:
+                break
+            # 否则是 auth 失败，继续下一个候选端点
+            continue
+
+        else:
+            # 所有候选端点都失败
+            log = "；".join(attempts_log) or "(无记录)"
+            detail = f"{type(last_exc).__name__}: {last_exc}" if last_exc else "见上方 attempts"
+            raise SynthError(
+                f"MiniMax 所有端点均失败：{log}；最近一次：{detail}"
+            )
+
+        # 走到这里说明拿到 200 且 base_resp.status_code == 0
+        elapsed = locals().get("elapsed", 0.0)
 
         # 真实字段是 data.audio（hex 编码）
         hex_audio = (data.get("data") or {}).get("audio", "")
@@ -166,9 +240,31 @@ class MiniMaxEngine(TTSEngine):
                 "model": self.model,
                 "voice_id_used": voice_id,
                 "generate_seconds": round(elapsed, 2),
+                "endpoint_used": ep,
             },
             instruct_applied=bool(chunk.instruct),
         )
+
+    def _endpoint_candidates(self) -> list[str]:
+        """
+        端点候选顺序 / Ordered endpoint candidates.
+
+        1. 用户显式配置（非空）
+        2. 白名单按 key 前缀推出的默认（避免重复）
+        3. 兜底：另一侧的官方端点
+        """
+        configured = (self.config.api.endpoint or "").strip()
+        keys = [configured] if configured else []
+
+        primary = _pick_endpoint(self._api_key, "")
+        if primary not in keys:
+            keys.append(primary)
+
+        # 兜底：把另一个域也带上（除非和 primary 相同）
+        for ep in _FALLBACK_ENDPOINTS:
+            if ep not in keys:
+                keys.append(ep)
+        return [k.rstrip("/") for k in keys if k]
 
     # ── voice clone + cache ──
 
