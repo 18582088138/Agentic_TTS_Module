@@ -14,3 +14,4 @@ build/
 dist/
 .env
 .venv/
+voices/api_voice_cache.json

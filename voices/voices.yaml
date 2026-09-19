@@ -33,3 +33,11 @@ calm_f:
 #   x_vector_only: false             # true = 只用 speaker embedding，不需要 ref_text
 #   language: Chinese
 #   description: 我自己的声音
+
+# 默认参考音频（中文，31.7s）
+default_ref_voice:
+  mode: voice_clone
+  ref_audio: refs/ref_audio_zh.mp3
+  ref_text: "今天的人工智能资讯"
+  language: Chinese
+  description: 默认参考音频

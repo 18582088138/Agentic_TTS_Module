@@ -33,9 +33,36 @@ _logger = get_logger("config")
 # 本文件位于 agentic_tts/core/config.py，上溯两层即项目根
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "config.yaml"
+DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def _load_dotenv_if_present() -> None:
+    """
+    把项目根的 `.env` 灌进 `os.environ`，**不**覆盖同名系统环境变量。
+
+    `.env` 是密钥的默认存放点（与 DailyNewsAssistant 一致：密钥只从 .env 读，代码零硬编码）。
+    Keys live only in `.env`; nothing hard-coded in source.
+
+    子进程（被 DNA supervisor 拉起的 TTS 服务）不继承 DNA 的 `os.environ`，
+    必须自己加载自己的 `.env`；两边在各自进程里互不干扰。
+    Children spawned by the supervisor do not inherit DNA's `os.environ`,
+    so they must read their own `.env`.
+    """
+    path = DEFAULT_ENV_FILE
+    if not path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv          # python-dotenv 是软依赖：缺它仅退到 env-var
+        load_dotenv(dotenv_path=path, override=False, encoding="utf-8")
+        _logger.debug(".env 已加载：%s", path)
+    except ImportError:
+        _logger.debug("python-dotenv 未安装，仅依赖系统环境变量")
 
 _DTYPES = ("auto", "bfloat16", "float16", "float32")
 _ATTN_IMPLS = ("eager", "sdpa", "flash_attention_2")
+
+# API 后端供应商白名单 / API provider whitelist
+_API_PROVIDERS = ("minimax", "dashscope", "openai", "elevenlabs")
 
 
 class EngineConfig(BaseModel):
@@ -110,6 +137,20 @@ class GuardConfig(BaseModel):
     duration_ratio: float = 3.0           # 比「字数/5」长这么多倍也算可疑
 
 
+# API 后端供应商白名单
+_API_PROVIDERS = ("minimax", "dashscope", "openai", "elevenlabs")
+
+
+class APIConfig(BaseModel):
+    """API 后端配置（与 engine.backend 并存，api.enabled=true 时启用）。"""
+    enabled: bool = False
+    provider: str = "minimax"
+    endpoint: str = ""                # 空 = 按 provider 选默认（sk-cp → api.minimaxi.com）
+    api_key: str = ""                 # 空 = 必须从环境变量 TTS_API_KEY 读
+    timeout_s: int = 60
+    model: str = "speech-2.8-turbo"
+
+
 class VoicesConfig(BaseModel):
     """音色档案 / Voice profiles."""
 
@@ -153,6 +194,7 @@ class Config(BaseModel):
     text: TextConfig = Field(default_factory=TextConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
     guard: GuardConfig = Field(default_factory=GuardConfig)
+    api: APIConfig = Field(default_factory=APIConfig)
     voices: VoicesConfig = Field(default_factory=VoicesConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     gui: GuiConfig = Field(default_factory=GuiConfig)
@@ -164,6 +206,11 @@ class Config(BaseModel):
     def load(cls, source: "Config | str | Path | None" = None) -> "Config":
         """
         读配置 / Load the configuration.
+
+        顺序 / Order:
+            1. `.env`（项目根，**不**覆盖进程已有环境变量）—— 密钥默认来源
+            2. `configs/config.yaml`（非敏感项：引擎、设备、端口……）
+            3. 进程环境变量（**最高**优先级，便于部署/CI 临时覆盖）
 
         参数 / Args:
             source: `Config` 原样返回；路径读该文件；None 读
@@ -177,6 +224,10 @@ class Config(BaseModel):
         """
         if isinstance(source, Config):
             return source
+
+        # 先把 `.env` 灌进 os.environ，**不**覆盖系统已有的同名变量
+        # —— 部署/CI 临时通过环境变量传的 `TTS_API_KEY` 必须仍然赢。
+        _load_dotenv_if_present()
 
         path = Path(source) if source else DEFAULT_CONFIG
         data: dict[str, Any] = {}
@@ -211,6 +262,10 @@ class Config(BaseModel):
             "TTS_DTYPE": (self.engine, "dtype", str),
             "TTS_SEED": (self.engine, "seed", int),
             "TTS_MAX_RESIDENT": (self.engine, "max_resident", int),
+            # API 后端覆盖（密钥在 .env，endpoint/model 偶尔也会临时改）
+            "TTS_API_KEY": (self.api, "api_key", str),
+            "TTS_API_ENDPOINT": (self.api, "endpoint", str),
+            "TTS_API_MODEL": (self.api, "model", str),
             "TTS_MODELS_DIR": (self.engine, "models_dir", str),
             "TTS_REPO_DIR": (self.engine, "repo_dir", str),
             "TTS_VOICES_DIR": (self.voices, "dir", str),
@@ -245,6 +300,13 @@ class Config(BaseModel):
             raise ConfigError(
                 f"text.max_chars({self.text.max_chars}) 必须大于 "
                 f"min_chars({self.text.min_chars})，否则分段会碎片化")
+        # API 校验
+        if self.api.enabled:
+            if self.api.provider not in _API_PROVIDERS:
+                raise ConfigError(
+                    f"api.provider={self.api.provider!r} 不合法　可选：{'、'.join(_API_PROVIDERS)}")
+            if self.api.timeout_s <= 0:
+                raise ConfigError("api.timeout_s 必须为正")
 
     # -- 派生路径 / derived paths --------------------------------------------
 
@@ -360,6 +422,7 @@ def ensure_qwen_tts_importable(repo_path: Path) -> Path:
 __all__ = [
     "DEFAULT_CONFIG",
     "PROJECT_ROOT",
+    "APIConfig",
     "AudioConfig",
     "Config",
     "EngineConfig",

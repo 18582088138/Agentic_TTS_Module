@@ -15,6 +15,9 @@
 conda activate ov_env_py312
 cd Agent_TTS_Module
 
+# agentic_tts install
+pip install -e ".[all]"
+
 # 1) 体检：配置、权重、设备、**实际导入的 qwen_tts 是哪一份**
 python -m agentic_tts.cli doctor
 

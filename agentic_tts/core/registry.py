@@ -25,6 +25,7 @@ _ENGINE_MODULES = {
     "qwen3": "agentic_tts.engines.qwen3",
     "qwen3_tts": "agentic_tts.engines.qwen3",
     "sine": "agentic_tts.engines.sine",
+    "minimax": "agentic_tts.engines.minimax",
     # 占位：接口未知，实例化时报清晰错误，但能力表已声明，GUI 可据此置灰
     "breeze2": "agentic_tts.engines.placeholders",
     "index2": "agentic_tts.engines.placeholders",
@@ -81,7 +82,7 @@ def engine_specs() -> list[dict]:
     **GUI 用这个置灰开关** —— 不加载任何权重就能知道谁支持克隆、谁支持指令。
     """
     specs = []
-    for name in ("qwen3", "sine", "breeze2", "index2"):
+    for name in ("qwen3", "sine", "minimax", "breeze2", "index2"):
         try:
             cls = get_engine_class(name)
         except ConfigError:
