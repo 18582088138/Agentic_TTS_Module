@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import logging
+import secrets
 import time
 from pathlib import Path
 from typing import Optional
@@ -46,6 +47,13 @@ _AUTH_STATUS_CODES = {
     1002,    # invalid authorization
     1008,    # payment required (key 绑在另一个账户上)
 }
+
+
+_VOICE_NOT_FOUND = 2054
+
+
+class _VoiceMissing(SynthError):
+    """t2a 报 2054：所给 voice_id 在服务端不存在。"""
 
 
 def _pick_endpoint(api_key: str, configured: str) -> str:
@@ -125,10 +133,38 @@ class MiniMaxEngine(TTSEngine):
             ("female-shaonv", "Chinese"),
             ("English_expressive_narrator", "English"),
         ]
-        return [
+        static = [
             VoiceInfo(name=n, mode=Mode.CUSTOM_VOICE, engine=self.name,
                       language=lang, description="", speaker=n)
             for n, lang in system_voices
+        ]
+        # 账号里克隆 / 设计出的音色在 MiniMax 侧就是普通 voice_id，按内置音色用。
+        # 不并进来的话 VoiceStore 不认这个名字，GUI 也选不到（docs/issues/006）。
+        account = [
+            VoiceInfo(name=vid, mode=Mode.CUSTOM_VOICE, engine=self.name,
+                      description=desc, speaker=vid)
+            for vid, desc in self._account_voices()
+        ]
+        return static + account
+
+    def _account_voices(self) -> list[tuple[str, str]]:
+        """账号音色 (voice_id, 说明)。查不到只记警告——不能因为列表拿不到就起不了服务。"""
+        import httpx
+
+        try:
+            r = httpx.post(f"{self.base_url}/v1/get_voice",
+                           headers={"Authorization": f"Bearer {self._api_key}"},
+                           json={"voice_type": "all"}, timeout=10)
+            data = _checked(r, "查询账号音色")
+        except (httpx.HTTPError, SynthError, ValueError) as exc:
+            _logger.warning("拿不到 MiniMax 账号音色，只列静态系统音色：%s", exc)
+            return []
+        kinds = (("voice_cloning", "克隆音色"), ("voice_generation", "设计音色"))
+        return [
+            (v["voice_id"], f"{label} · {v.get('created_time', '')}".rstrip(" ·"))
+            for key, label in kinds
+            for v in (data.get(key) or [])
+            if v.get("voice_id")
         ]
 
     def languages(self) -> list[str]:
@@ -139,10 +175,20 @@ class MiniMaxEngine(TTSEngine):
     def synthesize(self, chunk: SynthChunk) -> RawAudio:
         self.require_mode(chunk.mode)
 
-        voice_id = chunk.speaker or "male-qn-qingse"
-        if chunk.mode is Mode.VOICE_CLONE:
-            voice_id = self._resolve_or_clone_voice(chunk)
+        if chunk.mode is not Mode.VOICE_CLONE:
+            return self._synthesize_with(chunk, chunk.speaker or "male-qn-qingse")
 
+        voice_id = self._resolve_or_clone_voice(chunk)
+        try:
+            return self._synthesize_with(chunk, voice_id)
+        except _VoiceMissing:
+            # 缓存里的 voice_id 在服务端已不存在（曾被缓存的失败克隆，或 MiniMax
+            # 回收了久未使用的临时音色）。不清掉的话之后每一段都会 2054，永远不自愈。
+            _logger.warning("cached voice_id=%s 服务端不存在，作废缓存并重新克隆", voice_id)
+            self._forget_voice(voice_id)
+            return self._synthesize_with(chunk, self._resolve_or_clone_voice(chunk))
+
+    def _synthesize_with(self, chunk: SynthChunk, voice_id: str) -> RawAudio:
         body = self._build_request(chunk, voice_id)
 
         # 端点候选：用户配置的优先；其它按白名单顺序作为备用。
@@ -197,7 +243,8 @@ class MiniMaxEngine(TTSEngine):
                     break                           # 直接试下一端点（不耗 transport_retry）
                 # 业务错（参数、配额、限流等）—— 不重试也不换端点
                 msg = (data.get("base_resp") or {}).get("status_msg", "")
-                raise SynthError(
+                error = _VoiceMissing if code == _VOICE_NOT_FOUND else SynthError
+                raise error(
                     f"MiniMax 业务错（{ep}）：{code} {msg}".rstrip()
                 )
             else:
@@ -296,7 +343,8 @@ class MiniMaxEngine(TTSEngine):
         import httpx
 
         # 生成 voice_id（要求英文字母开头，仅含字母数字-_）
-        vid = f"v{digest[:8]}_{int(time.time()) % 10**6:06d}"[:64]
+        # 后缀用随机数而非秒级时间戳：2054 重克隆就在同一秒内，时间戳会撞出同一个 id。
+        vid = f"v{digest[:8]}_{secrets.token_hex(4)}"
 
         with httpx.Client(timeout=self.timeout_s) as client:
             # 1) 上传文件
@@ -307,8 +355,7 @@ class MiniMaxEngine(TTSEngine):
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 files=files, data=data,
             )
-            r.raise_for_status()
-            file_id = r.json()["file"]["file_id"]
+            file_id = _checked(r, "上传参考音频")["file"]["file_id"]
 
             # 2) 克隆
             body: dict = {
@@ -325,8 +372,15 @@ class MiniMaxEngine(TTSEngine):
                          "Content-Type": "application/json"},
                 json=body,
             )
-            r.raise_for_status()
+            # MiniMax 的业务错是 HTTP 200 + base_resp 非 0；只看 HTTP 码会把失败的
+            # 克隆当成功写进缓存，之后每次合成都 2054 voice id not exist（实测踩到）。
+            _checked(r, "克隆音色")
             return vid
+
+    def _forget_voice(self, voice_id: str) -> None:
+        self._cache = {k: v for k, v in self._cache.items()
+                       if v.get("voice_id") != voice_id}
+        self._save_cache()
 
     def _build_request(self, chunk: SynthChunk, voice_id: str) -> dict:
         """按 MiniMax 官方格式构造 t2a_v2 请求。"""
@@ -371,6 +425,17 @@ class MiniMaxEngine(TTSEngine):
         self._cache_path.write_text(
             json.dumps(self._cache, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+
+def _checked(resp, step: str) -> dict:
+    """HTTP 码与 base_resp 都过关才返回 JSON，否则抛带 MiniMax 原始错误码的 SynthError。"""
+    resp.raise_for_status()
+    data = resp.json()
+    base = data.get("base_resp") or {}
+    code = int(base.get("status_code", 0) or 0)
+    if code != 0:
+        raise SynthError(f"MiniMax {step}失败：{code} {base.get('status_msg', '')}".rstrip())
+    return data
 
 
 def _to_language_boost(language: str) -> str:
